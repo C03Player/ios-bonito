@@ -21,5 +21,5 @@ xbill9/android_device_google_bonito f64ad1276818e2cd72fcf3f51dbfa50dfb37bfbf).
 ## XNU patch series (baseline, unmodified)
 `xnu/patches/` is a verbatim copy of ios-flame @ 745c4341af86089efb0df851fa8a27fb8face624 `xnu/patches/` (ios-sweet 0001-0081 by
 dipa-studio, MIT; flame 0082-0124, MIT), which modify Apple's XNU (xnu-8796.141.3, Apple Public Source License 2.0). The patched files
-stay under the APSL 2.0. `.github/workflows/xnu.yml` is ios-sweet's/ios-flame's (MIT), unchanged. The first CI run uses this baseline
+stay under the APSL 2.0. `.github/workflows/xnu.yml` is ios-sweet's/ios-flame's (MIT) with one change: runs-on macos-14 -> macos-15 (macos-14 images are no longer offered). The first CI run uses this baseline
 with MACHINE_CONFIG=SWEET to prove the pipeline; bonito patches (0125+) are not written yet.
