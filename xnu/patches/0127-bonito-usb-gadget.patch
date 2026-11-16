@@ -1,0 +1,83 @@
+diff --git a3/bsd/dev/sweet_ufs.c b3/bsd/dev/sweet_ufs.c
+index 2f8a16a..9607f5a 100644
+--- a3/bsd/dev/sweet_ufs.c
++++ b3/bsd/dev/sweet_ufs.c
+@@ -784,6 +784,7 @@ sweet_ufs_init(void)
+ 	    want, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	sweet_log_start();
++	sweet_usb_probe();      /* boot-arg sweetusb=2 (+ sweetusbdma=<low PA>) starts the USB Ethernet gadget: bsd/dev/sweet_usb.c */
+ 	/* flame-only hardware (SM8150 OSM cpufreq, PM8150 keys, ST FTS touch, Adreno 640, flame USB offsets, ...) is
+ 	 * not started on bonito: each needs its own port first. */
+ 	return 0;
+diff --git a3/bsd/dev/sweet_usb.c b3/bsd/dev/sweet_usb.c
+index 1116ace..7ebab10 100644
+--- a3/bsd/dev/sweet_usb.c
++++ b3/bsd/dev/sweet_usb.c
+@@ -52,16 +52,19 @@ static const struct {
+ 	const char *name;
+ 	uint32_t    off;
+ } usb_cbcr[] = {
+-	/* flame (SM8150, gcc-sm8150.c); index 0 master and 3 cfg-noc-axi gate DWC3 reads */
+-	{ "master", 0x0f010 },
+-	{ "sleep", 0x0f014 },
+-	{ "utmi", 0x0f018 },
+-	{ "cfg-noc-axi", 0x0f078 },
+-	{ "aggre-axi", 0x0f07c },
+-	{ "phy-aux", 0x0f050 },
++	/* bonito (SDM670 shares gcc-sdm845.c: halt_reg of each branch); index 0 master and 3 cfg-noc-axi gate DWC3 reads */
++	{ "master", 0x0f00c },
++	{ "sleep", 0x0f010 },
++	{ "utmi", 0x0f014 },
++	{ "cfg-noc-axi", 0x0502c },
++	{ "aggre-axi", 0x8201c },
++	{ "phy-aux", 0x0f04c },
+ 	{ "clkref", 0x8c008 },
+ };
+ 
++/* bonito: apps SMMU stream of the DWC3 (DT: ssusb@a600000 iommus = <&apps_smmu 0x740 0>); flame used 0x140 */
++#define UD_SMMU_SID             0x740
++
+ #define DWC3_PA                 0x0a600000
+ #define DWC3_SIZE               0x0000d000
+ #define QUSB2_PA                0x088e2000
+@@ -1101,8 +1104,8 @@ ud_smmu_setup(uint64_t dma_pa)
+ 		if (((c >> 16) & 3) == 0) {
+ 			used[(c & 0xff) / 64] |= 1ULL << ((c & 0xff) % 64);
+ 		}
+-		if (((0x140 ^ (m & 0x7fff)) & ~((m >> 16) & 0x7fff) & 0x7fff) == 0) {
+-			printf("SWEET USB: SMMU smr%u %x already matches 0x140 (s2cr %x)\n", i, m, c);
++		if (((UD_SMMU_SID ^ (m & 0x7fff)) & ~((m >> 16) & 0x7fff) & 0x7fff) == 0) {
++			printf("SWEET USB: SMMU smr%u %x already matches 0x%x (s2cr %x)\n", i, m, UD_SMMU_SID, c);
+ 			return -1;
+ 		}
+ 	}
+@@ -1131,7 +1134,7 @@ ud_smmu_setup(uint64_t dma_pa)
+ 		*(volatile uint32_t *)(as + pagesz + 4 * cb) = 0x1f000;        /* CBAR as ABL's banks */
+ 		__asm__ volatile ("dsb sy" ::: "memory");
+ 		*(volatile uint32_t *)(as + 0xc00 + 4 * free_smr) = (uint32_t)cb;
+-		*(volatile uint32_t *)(as + 0x800 + 4 * free_smr) = (1u << 31) | 0x140;
++		*(volatile uint32_t *)(as + 0x800 + 4 * free_smr) = (1u << 31) | UD_SMMU_SID;
+ 		__asm__ volatile ("dsb sy" ::: "memory");
+ 		ud_smmu_cb = cbv;
+ 		printf("SWEET USB: SMMU smr%d %x s2cr %x -> cb%d cbar %x cba2r %x sctlr %x (translation off, as ABL)\n",
+@@ -1190,7 +1193,7 @@ ud_smmu_setup(uint64_t dma_pa)
+ 		delay(1);
+ 	}
+ 	*(volatile uint32_t *)(as + 0xc00 + 4 * free_smr) = (uint32_t)cb;      /* translate via cb */
+-	*(volatile uint32_t *)(as + 0x800 + 4 * free_smr) = (1u << 31) | 0x140;
++	*(volatile uint32_t *)(as + 0x800 + 4 * free_smr) = (1u << 31) | UD_SMMU_SID;
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ 	/* Self-test: read back our descriptors and ask the SMMU to translate (ATS1PR). */
+ 	printf("SWEET USB: SMMU pt L1[%llu] %llx L2[%llu] %llx tcr %x tcr2 %x mair0 %x ttbr0 %x:%x\n",
+@@ -1251,7 +1254,9 @@ ud_hsphy_dump(vm_offset_t p, const char *when)
+ static void
+ ud_hsphy_init(void)
+ {
+-	int doinit = 1;
++	/* bonito: off by default. The HS PHY at 0x88e2000 is a QUSB2 PHY here, not flame's femto PHY (different registers), and ABL
++	 * leaves it powered (the host kept seeing the phone as a USB device while the shim ran). */
++	int doinit = 0;
+ 	PE_parse_boot_argn("sweethsphy", &doinit, sizeof(doinit));
+ 	vm_offset_t p = ml_io_map(HSPHY_PA, 0x1000);
+ 	if (!p) {
