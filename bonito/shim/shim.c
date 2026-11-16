@@ -14,6 +14,7 @@
 #include "console.h"
 #include "fdt.h"
 #include "log.h"
+#include "emmc.h"
 #include "sde.h"
 #include "spmi.h"
 #include "util.h"
@@ -171,6 +172,74 @@ static void log_sdhci(void)
 		   rd32(SDHCI_BASE + 0x44), rd32(SDHCI_BASE + 0xfc) >> 16, rd32(SDHCI_BASE + 0x24),
 		   rd32(SDHCI_BASE + 0x28), rd32(SDHCI_BASE + 0x2c));
 	log_printf("sdhci: cq ver %x cfg %x\n", rd32(SDHCI_CQ_BASE), rd32(SDHCI_CQ_BASE + 4));
+	/* What the bootloader left behind: standard regs, HC_MODE, v5 vendor regs. Non-zero words only. */
+	static const uint16_t ranges[][2] = { { 0x00, 0x80 }, { 0xe0, 0x100 }, { 0x200, 0x260 } };
+	for (unsigned r = 0; r < sizeof(ranges) / sizeof(ranges[0]); r++) {
+		log_printf("sdhci %x-%x:", ranges[r][0], ranges[r][1]);
+		for (unsigned o = ranges[r][0]; o < ranges[r][1]; o += 4) {
+			uint32_t v = rd32(SDHCI_BASE + o);
+			if (v)
+				log_printf(" %x=%x", o, v);
+		}
+		log_printf("\n");
+	}
+}
+
+#ifdef SHIM_EMMC
+static uint32_t le32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+
+static void emmc_test(void)
+{
+	static uint8_t sec[512], ent[512];
+	int rc = emmc_init();
+	log_printf("emmc: init rc %d\n", rc);
+	STEP();
+	if (rc)
+		return;
+	rc = emmc_read(1, sec);
+	log_printf("gpt: rc %d sig %c%c%c%c%c%c%c%c rev %x hdr %u\n", rc, sec[0], sec[1], sec[2], sec[3], sec[4],
+		   sec[5], sec[6], sec[7], le32(sec + 8), le32(sec + 12));
+	uint32_t cur = le32(sec + 24), bak = le32(sec + 32), first = le32(sec + 40), last = le32(sec + 48);
+	uint32_t elba = le32(sec + 72), n = le32(sec + 80), esz = le32(sec + 84);
+	log_printf("gpt: lba %u backup %u usable %u-%u entries@%u n %u size %u\n", cur, bak, first, last, elba, n, esz);
+	STEP();
+	if (rc || sec[0] != 'E' || esz != 128 || n > 256)
+		return;
+	unsigned shown = 0;
+	for (uint32_t s_i = 0; s_i < (n + 3) / 4 && shown < 80; s_i++) {
+		if (emmc_read(elba + s_i, ent))
+			break;
+		for (int e = 0; e < 4 && shown < 80; e++) {
+			const uint8_t *p = ent + e * 128;
+			uint32_t f = le32(p + 32), l = le32(p + 40);
+			if (!le32(p) && !le32(p + 4) && !le32(p + 8) && !le32(p + 12))
+				continue;
+			if (s_i * 4 + e < 20)
+				continue;
+			char name[20];
+			int k = 0;
+			for (; k < 19 && p[56 + 2 * k]; k++)
+				name[k] = p[56 + 2 * k];
+			name[k] = 0;
+			/* two entries per row; sizes in MiB, start LBA in hex */
+			log_printf("%u %s %x +%u%s", s_i * 4 + e + 1, name, f, (l - f + 1) / 2048, (shown & 1) ? "\n" : "  ");
+			shown++;
+		}
+	}
+	STEP();
+}
+#endif
+
+/* GCC (0x100000): SDCC1 apps clock RCG/gating and GPLL0 as the bootloader left them (offsets from gcc-sdm845.c). */
+static void log_gcc(void)
+{
+	log_printf("gcc sdcc1: apps_cbcr %x ahb_cbcr %x cmd %x cfg %x m %x n %x d %x\n",
+		   rd32(0x100000UL + 0x26004), rd32(0x100000UL + 0x26008), rd32(0x100000UL + 0x26028),
+		   rd32(0x100000UL + 0x2602c), rd32(0x100000UL + 0x26030), rd32(0x100000UL + 0x26034),
+		   rd32(0x100000UL + 0x26038));
+	log_printf("gcc gpll0: mode %x l %x alpha %x user %x cfg %x\n", rd32(0x100000UL + 0x0),
+		   rd32(0x100000UL + 0x4), rd32(0x100000UL + 0x8), rd32(0x100000UL + 0x10),
+		   rd32(0x100000UL + 0x14));
 }
 
 static void __attribute__((noreturn)) stage_reset(void)
@@ -234,10 +303,17 @@ void shim_main(uintptr_t dtb)
 		STEP();
 	}
 	STAGE(4);
+#ifndef SHIM_BRIEF
 	log_gic();
 	STEP();
 	STAGE(5);
 	log_sdhci();
+	log_gcc();
+#endif
+	STEP();
+#ifdef SHIM_EMMC
+	emmc_test();
+#endif
 	log_printf("probe done at %lu ms\n", ticks_now() / 19200);
 	STEP();
 	/* Proof of life without a readable screen: after RESET_AFTER_S the shim asks for a

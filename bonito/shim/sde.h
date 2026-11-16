@@ -10,5 +10,6 @@ struct sde_state {
 };
 extern struct sde_state sde;
 
+extern int sde_verbose;
 void sde_probe(void);
 void sde_autorefresh(int frames);

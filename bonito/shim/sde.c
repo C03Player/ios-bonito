@@ -44,6 +44,7 @@ static const char sspp_name[5][5] = { "vig0", "vig1", "dma0", "dma1", "dma2" };	
 #define PP_AUTOREFRESH_CONFIG	0x030
 
 struct sde_state sde;
+int sde_verbose;	/* set by the shim: dump the LM/DSC/INTF blocks too */
 
 static void dump_block(const char *name, uintptr_t base, uint32_t len)
 {
@@ -81,14 +82,17 @@ void sde_probe(void)
 			sde.pipe_index = i;
 		}
 	}
-	for (int i = 0; i < 3; i++)
-		dump_block("lm", LM(i), 0x120);
+	if (sde_verbose)
+		for (int i = 0; i < 3; i++)
+			dump_block("lm", LM(i), 0x120);
 	for (int i = 0; i < 2; i++)
 		log_printf("pp%d: tear_en %x intcnt %x line %x autoref %x\n", i,
 			   rd32(PP(i) + PP_TEAR_CHECK_EN), rd32(PP(i) + PP_INT_COUNT_VAL),
 			   rd32(PP(i) + PP_LINE_COUNT), rd32(PP(i) + PP_AUTOREFRESH_CONFIG));
-	dump_block("dsc0", DSC(0), 0x140);
-	dump_block("intf1", INTF(1), 0x280);
+	if (sde_verbose) {
+		dump_block("dsc0", DSC(0), 0x140);
+		dump_block("intf1", INTF(1), 0x280);
+	}
 	sde.pp = 0;
 	sde.tear_en = 0;
 	for (int i = 0; i < 2; i++) {

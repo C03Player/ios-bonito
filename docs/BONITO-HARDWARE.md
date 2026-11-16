@@ -34,8 +34,21 @@ Status key: **[LIVE]** read on the phone by the probe shim (photo `logs/BONITOSH
 - ramoops 0xa1810000 (2 MiB), alt 0xa1a10000, meta 0xa1c10000 (B4 DTBO). [DTB]
 
 ## Storage: **eMMC, not UFS**
-- SDHCI controller 0x7c4000 (+CQ 0x7c5000), qcom,sdhci-msm-v5, 8-bit, HS400/HS200/DDR 1.8 V. Live: SDHCI spec v3 (0x6c02),
-  caps 742dc8b2:808f, CQHCI 5.1 (0x510). [LIVE/DTB] -> the shim/XNU need a new SDHCI driver (flame's ufs.c is useless).
+- SDHCI/SDCC5 controller 0x7c4000 (+CQHCI 0x7c5000, v5.10), qcom,sdhci-msm-v5, 8-bit, HS400/HS200/DDR 1.8 V. SDHCI v3 (0x6c02), caps 742dc8b2:808f.
+  Caps bit 22 (SDMA) is clear, bit 19 (ADMA2) is set. [LIVE]
+- ABL leaves the controller shut down: bus power off (PWRCTL_CTL 1), SD clock off, DLL in reset (0x200 = 6000642c), HC_MODE 0.
+  GCC (0x100000): SDCC1 apps clock parked on src 2 (GPLL6) /1 = 384 MHz, CBCRs enabled; GPLL0 (L=0x1f) running and locked. [LIVE]
+- **Working bring-up (bonito/shim/emmc.c, read-only, verified on the phone 2026-11-16):** GCC SDCC1 RCG = GPLL0_OUT_MAIN/6 (cfg 0x10b, cmd 0x3,
+  100 MHz) -> HC_MODE=1 -> SDHCI soft reset -> poll+ack power IRQ (PWRCTL_STATUS 0x240 / CLEAR 0x248 / CTL 0x24c) after writing power 0x0b (1.8 V)
+  -> VENDOR_SPEC (0x20c) |= IO_PAD_PWR_SWITCH_EN|IO_PAD_PWR_SWITCH -> SDCLK 400 kHz (div 125) -> CMD0, CMD1 (ocr c0ff8080, sector mode),
+  CMD2, CMD3, CMD7, then ADMA2 single-block reads (CMD8 EXT_CSD, CMD17). 1-bit, legacy timing so far (slow). VCC/VCCQ regulators untouched (left on by ABL).
+- **PIO does NOT work on this controller**: reads from the buffer port 0x20 return the first word every time and TRANSFER_COMPLETE never fires. Use ADMA2. [LIVE]
+- Device: 64 GB eMMC 5.1 (EXT_CSD rev 8): CID 13014e 53304a39 4b38100c 3359c216 (MID 0x13, name "S0J9K8"), sec_count 122142720 (59640 MiB),
+  boot partitions 4096 KiB each, PARTITION_CONFIG 0x38, bus width reg 0 (1-bit) after our init. [LIVE]
+- GPT (valid, 72 entries of 128 B at LBA 2, backup at LBA 122142719, usable 34-122142686). Layout (first LBA hex / MiB): boot_a 7b28/64, boot_b 27b28/64,
+  modem_a 49328/110, abl_a d6328/2, splash dcf38/32, persist fd600/40, misc 111600/1, vbmeta_a 156300, metadata 158400/16,
+  system_a 162400/3116, system_b 778400/3116, vendor_a d8e400/768, vendor_b f0e400/768,
+  **userdata 108e400 (=17360896) / 51163 MiB** - the candidate home of an iOS root image (wipe accepted by the user). [LIVE]
 
 ## Display
 - SDE hw 4.0.1 (reg 0x40010000), MDP 0xae00000. Pipe vig0 -> LM0 -> PP0 -> DSC0 -> INTF1 (DSI). [LIVE]

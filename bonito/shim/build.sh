@@ -14,7 +14,7 @@ ROOT=$(cd ../.. && pwd)
 CC="${CC:-clang} --target=aarch64-none-elf"
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-builtin -fno-pic -fno-pie -mgeneral-regs-only -mstrict-align
 	-fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra ${SHIM_CFLAGS:-}"
-SRCS="start.S shim.c console.c log.c util.c fdt.c spmi.c sde.c"
+SRCS="start.S shim.c console.c log.c util.c fdt.c spmi.c sde.c emmc.c"
 mkdir -p out
 objs=
 for f in $SRCS; do
