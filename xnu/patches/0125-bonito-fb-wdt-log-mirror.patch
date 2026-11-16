@@ -1,0 +1,85 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 99a9c87..6cacc12 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -705,7 +705,7 @@ static uint32_t sweet_log_secs = SWEET_LOG_SECS;
+  *   +0x1000 ring bytes (offset of byte n = n % ring size)
+  * The next shim boot copies its tail to UFS (tools/flame-log-pull.sh rescue).
+  */
+-#define SWEET_MIRROR_PA         0x1fe000000ULL
++#define SWEET_MIRROR_PA         0x17c000000ULL	/* bonito: inside the 2nd RAM bank (0x100000000 + 0x7e2c0000), above the ADT range (dram-size 0x7c000000) */
+ struct sweet_mirror_header {
+ 	char magic[8];
+ 	uint64_t total;
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index 2514af3..5d6b4e5 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -33,7 +33,7 @@ OSDefineMetaClassAndStructors(SweetPlatformExpert, IODTPlatformExpert);
+  */
+ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+-#define FLAME_WDT_PA    0x17c10000
++#define FLAME_WDT_PA    0x17980000	/* bonito: qcom,wdt@17980000 (stock SDM670 DTB). Untested: writing it from the shim killed the shim. */
+ #define FLAME_WDT_RST   0x04
+ #define FLAME_WDT_EN    0x08
+ #define FLAME_WDT_PET_S 5
+@@ -57,8 +57,16 @@ flame_wdt_thread(void *arg)
+ static void
+ flame_wdt_start(void)
+ {
++	/*
++	 * bonito: off unless boot-arg flamewdt=N is given (1 = pet, 0 = disable). The shim never armed
++	 * this WDT, and touching it from the shim made the phone reset early, so XNU does not touch it
++	 * by default until that is understood.
++	 */
+ 	int enabled = 1;
+-	PE_parse_boot_argn("flamewdt", &enabled, sizeof(enabled));
++	if (!PE_parse_boot_argn("flamewdt", &enabled, sizeof(enabled))) {
++		IOLog("BONITO WDT: untouched (boot-arg flamewdt not given)\n");
++		return;
++	}
+ 	volatile uint32_t *wdt = (volatile uint32_t *)ml_io_map(FLAME_WDT_PA, 0x1000);
+ 	if (wdt == NULL) {
+ 		IOLog("FLAME WDT: mapping failed\n");
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index f876fb0..ae562be 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -359,9 +359,9 @@ OSDefineMetaClassAndStructors(SweetHIDButtons, IOHIDEventService);
+ #define SWEET_TOUCH_EDGE_PX 48
+ extern "C" int sweet_display_fit_x, sweet_display_fit_y, sweet_display_fit_w, sweet_display_fit_h;
+ 
+-/* Touch reports panel pixels; flame's panel is 1080x2280 (SWEET.h). */
++/* Touch reports panel pixels; bonito's panel is 1080x2160 (SWEET.h). */
+ #define SWEET_PANEL_W 1080
+-#define SWEET_PANEL_H 2280
++#define SWEET_PANEL_H 2160
+ class SweetHIDTouch : public IOHIDEventService {
+ 	OSDeclareDefaultStructors(SweetHIDTouch);
+ public:
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index 963e02d..0350584 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -51,15 +51,16 @@
+ #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
+ 
+ /*
+- * Pixel 4 (flame): splash framebuffer ABL scans out (cont_splash_region;
+- * ABL leaves the command-mode panel autorefreshing), 1080x2280 a8r8g8b8,
++ * Pixel 3a XL (bonito): splash framebuffer ABL scans out (cont_splash_region
++ * 0x9c000000; ABL leaves the command-mode panel autorefreshing; vig0 scans
++ * 0x9c000000 stride 0x10e0, read back live on the phone), 1080x2160 a8r8g8b8,
+  * 4320-byte rows. The bootstrap console uses it before the ADT is parsed.
+  * SWEET_EARLY_FB_BLOCK_PA is the 32MB L2 block holding it.
+  */
+-#define SWEET_EARLY_FB_PA         0x9c400000
++#define SWEET_EARLY_FB_PA         0x9c000000
+ #define SWEET_EARLY_FB_BLOCK_PA   0x9c000000
+ #define SWEET_EARLY_FB_WIDTH      1080
+-#define SWEET_EARLY_FB_HEIGHT     2280
++#define SWEET_EARLY_FB_HEIGHT     2160
+ #define SWEET_EARLY_FB_STRIDE     4320
+ 
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
