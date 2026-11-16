@@ -41,7 +41,7 @@ Status key: **[LIVE]** read on the phone by the probe shim (photo `logs/BONITOSH
 - **Working bring-up (bonito/shim/emmc.c, read-only, verified on the phone 2026-11-16):** GCC SDCC1 RCG = GPLL0_OUT_MAIN/6 (cfg 0x10b, cmd 0x3,
   100 MHz) -> HC_MODE=1 -> SDHCI soft reset -> poll+ack power IRQ (PWRCTL_STATUS 0x240 / CLEAR 0x248 / CTL 0x24c) after writing power 0x0b (1.8 V)
   -> VENDOR_SPEC (0x20c) |= IO_PAD_PWR_SWITCH_EN|IO_PAD_PWR_SWITCH -> SDCLK 400 kHz (div 125) -> CMD0, CMD1 (ocr c0ff8080, sector mode),
-  CMD2, CMD3, CMD7, then ADMA2 single-block reads (CMD8 EXT_CSD, CMD17). 1-bit, legacy timing so far (slow). VCC/VCCQ regulators untouched (left on by ABL).
+  CMD2, CMD3, CMD7, then ADMA2 single-block reads (CMD8 EXT_CSD, CMD17). 1-bit, legacy timing at bring-up (slow); see "eMMC fast mode" below. VCC/VCCQ regulators untouched (left on by ABL).
 - **PIO does NOT work on this controller**: reads from the buffer port 0x20 return the first word every time and TRANSFER_COMPLETE never fires. Use ADMA2. [LIVE]
 - Device: 64 GB eMMC 5.1 (EXT_CSD rev 8): CID 13014e 53304a39 4b38100c 3359c216 (MID 0x13, name "S0J9K8"), sec_count 122142720 (59640 MiB),
   boot partitions 4096 KiB each, PARTITION_CONFIG 0x38, bus width reg 0 (1-bit) after our init. [LIVE]
@@ -71,3 +71,8 @@ Reached by `fastboot boot` of shim + payload (ramdisk). Photo of the screen, con
 - AMFI/Sandbox stand-ins, HFS, networking stack, skywalk self-tests, MAC framework all initialise.
 - Stops at `Waiting on IOMedia Apple_HFS` (no root device). The phone does not reset: with XNU not touching the APSS WDT (patch 0125) the
   phone ran >= the whole observation without a watchdog bite, so the earlier early resets were caused by the shim's own writes to 0x17980000.
+
+## eMMC fast mode (shim, verified 2026-11-16, photo BOOTSHIM10)
+After CMD7: CMD6 EXT_CSD[185] HS_TIMING=1 (status 0x900, ok), SDCLK 100 MHz/(2*1) = 50 MHz with HOST_CONTROL high-speed bit, CMD6 EXT_CSD[183]
+BUS_WIDTH=2 (8-bit SDR, status 0x900, ok), HOST_CONTROL 8-bit bit. CMD18 multi-block + auto CMD12 through ADMA2 (32-bit descriptors,
+32 KiB each): **45,473 kB/s** over 64 MiB from userdata; the GPT still reads correctly afterwards. DDR52/HS200/HS400 (DLL, tuning) not tried.

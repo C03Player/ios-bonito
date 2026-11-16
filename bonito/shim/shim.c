@@ -197,6 +197,17 @@ static void emmc_test(void)
 	STEP();
 	if (rc)
 		return;
+	{
+		int kb;
+		rc = emmc_fast();
+		log_printf("emmc: fast mode rc %d\n", rc);
+		STEP();
+		if (!rc) {
+			kb = emmc_bench(0x108e400, 64);
+			log_printf("emmc: bench 8-bit HS 50 MHz: %d kB/s\n", kb);
+			STEP();
+		}
+	}
 	rc = emmc_read(1, sec);
 	log_printf("gpt: rc %d sig %c%c%c%c%c%c%c%c rev %x hdr %u\n", rc, sec[0], sec[1], sec[2], sec[3], sec[4],
 		   sec[5], sec[6], sec[7], le32(sec + 8), le32(sec + 12));

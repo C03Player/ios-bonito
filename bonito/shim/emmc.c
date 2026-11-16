@@ -301,6 +301,118 @@ int emmc_init(void)
 	return 0;
 }
 
+
+/* ---- 8-bit high-speed mode and multi-block reads ---- */
+#define XFER_MAX_BLOCKS	2048	/* 1 MiB */
+static uint8_t xfer_buf[XFER_MAX_BLOCKS * 512] __attribute__((aligned(64)));
+static volatile uint64_t xfer_desc[XFER_MAX_BLOCKS * 512 / 0x8000 + 1] __attribute__((aligned(8)));
+
+/* Read n (1..2048) sectors starting at lba into xfer_buf through ADMA2 with CMD18 + auto CMD12. */
+static int xfer_read(uint32_t lba, unsigned n)
+{
+	if (!n || n > XFER_MAX_BLOCKS)
+		return -20;
+	unsigned bytes = n * 512, d = 0;
+	for (unsigned off = 0; off < bytes; off += 0x8000, d++) {
+		unsigned len = bytes - off > 0x8000 ? 0x8000 : bytes - off;
+		uint64_t attr = 0x21 | (off + len >= bytes ? 0x2 : 0);
+		xfer_desc[d] = (uint64_t)(uint32_t)(uintptr_t)(xfer_buf + off) << 32 | (uint64_t)len << 16 | attr;
+	}
+	wr32(SDHCI + S_ADMA_ADDR, (uint32_t)(uintptr_t)xfer_desc);
+	wr8(SDHCI + S_HCTL, (rd8(SDHCI + S_HCTL) & ~0x18) | 0x10);
+	wr16(SDHCI + S_BLK, 512);
+	wr16(SDHCI + S_BLK + 2, n);
+	wr16(SDHCI + S_TOUT, 0xe);
+	if (wait_clear32(SDHCI + S_PRES, 3, 100))
+		return -10;
+	wr32(SDHCI + S_INT, 0xffffffff);
+	wr32(SDHCI + S_ARG, hc_card ? lba : lba * 512);
+	/* DMA | block count | auto CMD12 | read | multi-block */
+	wr32(SDHCI + S_CMD, (18u << 24) | (CF(R_48, 1, 1, 1) << 16) | 0x37);
+	uint64_t end = ticks_now() + 19200ULL * 2000;
+	uint32_t st;
+	for (;;) {
+		st = rd32(SDHCI + S_INT);
+		if (st & 0x8000)
+			break;
+		if (st & 2)
+			break;
+		if (ticks_now() > end) {
+			log_printf("emmc: xfer timeout int %x pres %x\n", st, rd32(SDHCI + S_PRES));
+			wr8(SDHCI + S_RST, 6);
+			wait_bit8(SDHCI + S_RST, 6, 0, 10);
+			return -11;
+		}
+	}
+	if (st & 0x8000) {
+		log_printf("emmc: xfer error int %x adma_err %x\n", st, rd32(SDHCI + S_ADMA_ERR));
+		wr32(SDHCI + S_INT, st);
+		wr8(SDHCI + S_RST, 6);
+		wait_bit8(SDHCI + S_RST, 6, 0, 10);
+		return -12;
+	}
+	wr32(SDHCI + S_INT, 0xffffffff);
+	return 0;
+}
+
+static int switch_ext(uint32_t index, uint32_t value)
+{
+	uint32_t r[4];
+	int rc = cmd(6, (3u << 24) | (index << 16) | (value << 8) | 1, CF(R_48B, 1, 1, 0), r);
+	if (rc)
+		return rc;
+	if (wait_xfer_done(500))
+		return -30;
+	rc = cmd(13, rca << 16, CF(R_48, 1, 1, 0), r);
+	log_printf("emmc: SWITCH[%u]=%u status %x rc %d\n", index, value, r[0], rc);
+	return rc ? rc : (r[0] & 0x80 ? -31 : 0);	/* bit 7 = SWITCH_ERROR */
+}
+
+/* High speed timing, 8-bit bus, 50 MHz. */
+int emmc_fast(void)
+{
+	int rc = switch_ext(185, 1);	/* HS_TIMING = high speed */
+	if (rc)
+		return rc;
+	wr16(SDHCI + S_CLK, 0);
+	wr16(SDHCI + S_CLK, (1u << 8) | 1);	/* 100 MHz / (2 * 1) = 50 MHz */
+	uint64_t end = ticks_now() + 19200ULL * 20;
+	while (!(rd16(SDHCI + S_CLK) & 2) && ticks_now() < end)
+		;
+	wr16(SDHCI + S_CLK, rd16(SDHCI + S_CLK) | 4);
+	wr8(SDHCI + S_HCTL, rd8(SDHCI + S_HCTL) | 0x04);	/* high speed enable */
+	delay_ms(2);
+	rc = switch_ext(183, 2);	/* BUS_WIDTH = 8-bit SDR */
+	if (rc)
+		return rc;
+	wr8(SDHCI + S_HCTL, rd8(SDHCI + S_HCTL) | 0x20);	/* host 8-bit */
+	delay_ms(2);
+	return 0;
+}
+
+/* Speed test: read total_mib MiB in 1 MiB requests; returns kB/s, or negative error. */
+int emmc_bench(uint32_t lba, unsigned total_mib)
+{
+	uint64_t t0 = ticks_now();
+	for (unsigned i = 0; i < total_mib; i++) {
+		int rc = xfer_read(lba + i * XFER_MAX_BLOCKS, XFER_MAX_BLOCKS);
+		if (rc)
+			return rc;
+	}
+	uint64_t us = (ticks_now() - t0) * 1000000ULL / 19200000ULL;
+	return (int)((uint64_t)total_mib * 1024 * 1000000ULL / (us ? us : 1));
+}
+
+const uint8_t *emmc_xfer_buf(void)
+{
+	return xfer_buf;
+}
+
+int emmc_read_multi(uint32_t lba, unsigned n)
+{
+	return xfer_read(lba, n);
+}
+
 uint32_t emmc_sectors(void)
 {
 	return sectors;
