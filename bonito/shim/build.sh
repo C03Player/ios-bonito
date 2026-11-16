@@ -35,7 +35,7 @@ if [ -f "$ROOT/downloads/mkbootimg/mkbootimg.py" ] && [ -f "$ROOT/stock/unpacked
 		--header_version 2 --kernel out/Image.lz4 --ramdisk out/ramdisk.bin --dtb "$ROOT/stock/unpacked/dtb" \
 		--base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 --tags_offset 0x100 \
 		--dtb_offset 0x1f00000 --pagesize 4096 --os_version 12.0.0 --os_patch_level 2022-05 \
-		--cmdline "console=null" -o "$OUT"
+		--cmdline "${BOOT_CMDLINE:-console=ttyMSM0,115200n8 androidboot.console=ttyMSM0 printk.devkmsg=on msm_rtb.filter=0x237 ehci-hcd.park=3 service_locator.enable=1 firmware_class.path=/vendor/firmware cgroup.memory=nokmem lpm_levels.sleep_disabled=1 loop.max_part=7 androidboot.boot_devices=soc/7c4000.sdhci androidboot.super_partition=system buildvariant=user}" -o "$OUT"
 	# Google's ABL (as on flame) wants an AVB hash footer on 'fastboot boot' images.
 	if [ -f "$ROOT/downloads/avb/avbtool.py" ]; then
 		python3 "$ROOT/downloads/avb/avbtool.py" add_hash_footer --image "$OUT" \
