@@ -23,3 +23,8 @@ xbill9/android_device_google_bonito f64ad1276818e2cd72fcf3f51dbfa50dfb37bfbf).
 dipa-studio, MIT; flame 0082-0124, MIT), which modify Apple's XNU (xnu-8796.141.3, Apple Public Source License 2.0). The patched files
 stay under the APSL 2.0. `.github/workflows/xnu.yml` is ios-sweet's/ios-flame's (MIT) with one change: runs-on macos-14 -> macos-15 (macos-14 images are no longer offered). The first CI run uses this baseline
 with MACHINE_CONFIG=SWEET to prove the pipeline; bonito patches (0125+) are not written yet.
+
+## Root-image tools (copied unmodified)
+`bonito/tools/mkiosroot.sh` (ios-flame @ 745c4341, derived from ios-sweet, MIT) and `bonito/tools/sweet-root-tweaks.py` (ios-sweet @ 45263bee, MIT).
+`bonito/tools/build-ios-root.sh` is new: it drives them (verify IPSW, extract the OS/SystemOS/AppOS images, build, tweak, fsck). apfs-fuse (sgan81, GPL-3.0)
+is built from source at 66b86bd and never redistributed; no Apple files are in the repository.
