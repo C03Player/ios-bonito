@@ -1,0 +1,14 @@
+# Local inputs and proprietary / device-specific data: never committed
+images/
+stock/
+downloads/
+third_party/
+backup/
+work/
+logs/
+ios-root/
+*.ipsw
+*.img
+*.bin
+*.o
+out/
