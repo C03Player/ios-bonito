@@ -43,24 +43,44 @@
 static int screen_ok;
 static volatile int in_exception;
 
-/* Redraw the whole log; the newest text is the end, so show the tail that fits. */
+/*
+ * Draw the log on the panel. Incremental: only complete lines added since the last call are painted, because a full
+ * repaint takes seconds on the slow framebuffer mapping and a photo taken meanwhile shows half-painted glyphs.
+ * When the screen is full, clear and repaint the tail once.
+ */
+static uint32_t shown;
+
 static void show(void)
 {
 	if (!screen_ok)
 		return;
+	uint32_t end = log_len;
+	while (end > shown && log_buf[end - 1] != '\n')
+		end--;
+	if (end == shown)
+		return;
+	if (!shown) {
+		con_clear(0xff102030);
+		con_home();
+	}
+	uint32_t n = con_text(log_buf + shown, end - shown, WHITE);
+	shown += n;
+	if (shown >= end)
+		return;
+	/* screen full: repaint only the tail that fits */
 	con_clear(0xff102030);
 	uint32_t start = 0;
-	/* skip leading lines until the rest fits (measure with fg == 0) */
-	while (start < log_len) {
+	while (start < end) {
 		con_home();
-		if (con_text(log_buf + start, log_len - start, 0) == log_len - start)
+		if (con_text(log_buf + start, end - start, 0) == end - start)
 			break;
-		while (start < log_len && log_buf[start] != '\n')
+		while (start < end && log_buf[start] != '\n')
 			start++;
 		start++;
 	}
 	con_home();
-	con_text(log_buf + start, log_len - start, WHITE);
+	con_text(log_buf + start, end - start, WHITE);
+	shown = end;
 }
 
 #define STEP() show()
@@ -220,9 +240,15 @@ static void emmc_test(void)
 		log_printf("emmc: fast mode rc %d\n", rc);
 		STEP();
 		if (!rc) {
+#ifdef SHIM_TEST_HIGH
+			/* DMA into RAM above 4 GiB: this made the phone reset to Android (no bootloader flag) with no
+			 * exception, most likely an SMMU/XPU violation. Off by default; XNU's eMMC DMA buffer must be low RAM. */
+			log_printf("emmc: ADMA64 test (RAM above 4 GiB) starting\n");
+			STEP();
 			rc = emmc_test_high();
 			log_printf("emmc: high-RAM ADMA64 test rc %d\n", rc);
 			STEP();
+#endif
 			kb = emmc_bench(0x108e400, 64);
 			log_printf("emmc: bench 8-bit HS 50 MHz: %d kB/s\n", kb);
 			STEP();

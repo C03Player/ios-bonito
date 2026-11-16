@@ -87,9 +87,11 @@ void con_home(void)
 	row = 0;
 }
 
+#define STATUS_BAND	4	/* rows kept free at the bottom for con_status() */
+
 int con_rows(void)
 {
-	return (FB_H - TOP) / CH_H;
+	return (FB_H - TOP) / CH_H - STATUS_BAND;	/* rows available to the log */
 }
 
 /*
@@ -130,11 +132,9 @@ unsigned con_text(const char *s, unsigned len, uint32_t fg)
 void con_status(const char *s, uint32_t fg)
 {
 	int save = row;
-	row = con_rows() - 1;
-	unsigned n = 0;
-	while (s[n])
-		n++;
-	con_text(s, n, fg);
+	row = con_rows() + 1;	/* second row of the reserved band, clear of the log and of the panel edge */
+	for (int col = 0; s[col]; col++)
+		put_char(col, s[col], fg);	/* put_char paints the whole cell: no clearing needed */
 	row = save;
 }
 

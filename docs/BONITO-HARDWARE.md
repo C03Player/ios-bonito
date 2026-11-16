@@ -76,3 +76,12 @@ Reached by `fastboot boot` of shim + payload (ramdisk). Photo of the screen, con
 After CMD7: CMD6 EXT_CSD[185] HS_TIMING=1 (status 0x900, ok), SDCLK 100 MHz/(2*1) = 50 MHz with HOST_CONTROL high-speed bit, CMD6 EXT_CSD[183]
 BUS_WIDTH=2 (8-bit SDR, status 0x900, ok), HOST_CONTROL 8-bit bit. CMD18 multi-block + auto CMD12 through ADMA2 (32-bit descriptors,
 32 KiB each): **45,473 kB/s** over 64 MiB from userdata; the GPT still reads correctly afterwards. DDR52/HS200/HS400 (DLL, tuning) not tried.
+
+## DMA above 4 GiB resets the phone (2026-11-16)
+A 64-bit ADMA2 transfer whose descriptors and data were in RAM above 4 GiB (0x110000000) made the shim die with no exception: the phone then booted
+**Android** (reset without the PMIC bootloader flag), never reaching the countdown. The same shim without that test ran to the end and returned to
+fastboot. Cause not proven (suspected SMMU/XPU violation of a DMA master outside its allowed range). Consequence for XNU: XNU's managed RAM is
+entirely above 4 GiB (ADT dram-base 0x100000000), so the eMMC DMA bounce buffer and descriptors must be **low RAM** outside XNU's range: use
+0x80400000 (+2 MiB), free per the stock DTB's reserved-memory map (free from 0x80000000 to the hyp carve-out at 0x85700000, except the shim image
+at 0x80080000, DTB 0x84500000 and ramdisk 0x84700000). Low-RAM 32-bit ADMA2 DMA is proven (the shim's own buffers at ~0x80xxxxxx).
+Also: fastbootd `fetch` is refused on this user build ("Fetch is not allowed on user build"), so partition read-back over fastboot is not possible.
