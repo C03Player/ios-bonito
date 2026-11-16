@@ -12,3 +12,4 @@ ios-root/
 *.bin
 *.o
 out/
+logs_flash.txt

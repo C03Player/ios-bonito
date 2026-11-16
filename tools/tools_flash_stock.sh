@@ -1,9 +1,10 @@
 #!/bin/bash
 # Official factory flash for bonito (same steps as the image's flash-all.sh), with a product check first.
 set -u
-D=/workspace/IOSOnPixel/images/bonito-sp2a.220505.008/bonito-sp2a.220505.008
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+D=$ROOT/images/bonito-sp2a.220505.008/bonito-sp2a.220505.008
 cd "$D" || exit 1
-( cd /workspace/IOSOnPixel/images && sha256sum -c SHA256SUMS ) || { echo "checksum FAIL"; exit 1; }
+( cd "$ROOT/images" && sha256sum -c SHA256SUMS ) || { echo "checksum FAIL"; exit 1; }
 for i in $(seq 1 300); do
   P=$(timeout 5 fastboot getvar product 2>&1 | head -1)
   case "$P" in *bonito*) break;; esac; sleep 2

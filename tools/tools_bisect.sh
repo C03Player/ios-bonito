@@ -1,6 +1,6 @@
 #!/bin/bash
 # For each stage image: boot it, time how long until fastboot answers again. Idle shim => ~ wait+reboot; early death => ~+20s.
-cd /workspace/IOSOnPixel/bonito/shim
+cd "$(dirname "$0")/../bonito/shim"
 for n in "$@"; do
   for i in $(seq 1 60); do timeout 5 fastboot getvar product 2>&1 | grep -q bonito && break; sleep 2; done
   P=$(timeout 10 fastboot getvar product 2>&1 | head -1); case "$P" in *bonito*) ;; *) echo "stage $n: no bonito, stop"; exit 1;; esac
