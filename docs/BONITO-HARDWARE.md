@@ -12,10 +12,14 @@ Status key: **[LIVE]** read on the phone by the probe shim (photo `logs/BONITOSH
 - Image rules (as flame): header v2, base 0, kernel_off 0x8000, ramdisk_off 0x1000000, tags 0x100, dtb_off 0x1f00000,
   page 4096, LZ4 kernel, Image header text_offset 0x80000, AVB hash footer, partition size 64 MiB. [LIVE: accepted]
 - ABL hands over at EL1, MMU off, x0 = DTB at 0x84500000, ramdisk at 0x84700000. [LIVE]
-- The phone resets itself ~13 s after the shim starts (watchdog; PON 0x88f reads 0x10 = flame's "WDT" value). Writes to the
-  WDT at 0x17980000 (DTB) were tried in later builds, which never reached the display: unresolved. [LIVE, partly]
-- The probe only displays reliably after a cold fastboot entry (power-off, Power+Vol-Down). After a shim-caused reset the
-  screen stayed at the bootloader warning. Cause unknown. [LIVE]
+- **Dev loop works unattended.** `fastboot boot` -> ~5 s orange warning -> shim runs -> after its timer it writes PM660 PON
+  0x88f (reason 2 << 1) and issues PSCI SYSTEM_RESET -> phone returns to fastboot with no buttons. [LIVE]
+- The shim runs >= 30 s with no watchdog handling: the APSS WDT is not a problem for a probe. [LIVE, bisect 2026-11-16]
+- **Do not touch the APSS WDT at 0x17980000 (DTB address).** Builds that wrote it (SHIM_WDT_QUIET) died early, never reached
+  the display and made the phone return to fastboot ~13 s after start. Cause of the death not analysed (access fault/hang?). [LIVE]
+- The display works after both cold and shim-caused resets (earlier "cold start only" theory was wrong). [LIVE]
+- PON 0x88f reads 0x10 at shim start in every run, whatever was written before: the bootloader rewrites it. It is NOT evidence
+  of a watchdog reset. [LIVE]
 
 ## SoC
 - CPU: 8 cores, MIDR 0x517f803c (Kryo 360 Gold) MPIDR 0x81000000 (affinity in Aff1: cpu n = 0x81000n00 pattern, GICR typer

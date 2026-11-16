@@ -175,6 +175,9 @@ static void log_sdhci(void)
 
 static void __attribute__((noreturn)) stage_reset(void)
 {
+	/* After the measured wait only: ask the PMIC for "bootloader" so the test loop needs no buttons. */
+	if (!spmi_init())
+		set_reboot_bootloader();
 	for (;;) {
 		smc_call(PSCI_SYSTEM_RESET, 0, 0, 0);
 		__asm__ volatile("wfe");

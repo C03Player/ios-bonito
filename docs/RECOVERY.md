@@ -19,4 +19,4 @@ Power off (hold Power ~30 s), then hold Power + Volume Down. If the bootloader h
 ## Lessons
 - The original bootloader `b4s4-0.1-5653622` cannot `fastboot boot` any header-v2 image; 0.4 can.
 - The unlocked bootloader shows an orange warning for ~5 s before the booted image starts.
-- The probe shim's screen output only appeared after a cold fastboot entry.
+- The probe screen output works after any reset; earlier failures were caused by watchdog writes in the shim.
