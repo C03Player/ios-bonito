@@ -27,7 +27,9 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die "run as root (sudo bash $0 ...)"
 [ -f "$IPSW" ] || die "IPSW not found: $IPSW"
 mkdir -p "$WORK"
-exec > >(tee -a "$WORK/build.log") 2>&1
+# Log to the work dir and also to <repo>/logs/ (small; the repo is the workspace the assistant can read).
+mkdir -p "$ROOT/logs"
+exec > >(tee -a "$WORK/build.log" "$ROOT/logs/build-ios-root.log") 2>&1
 say "build started $(date -u +%FT%TZ)  ipsw=$IPSW  work=$WORK  size=$SIZE"
 
 # ---- free space (a mis-mounted USB stick would silently fill the system disk) ----
