@@ -65,19 +65,36 @@ static void show(void)
 
 #define STEP() show()
 
+static void __attribute__((noreturn)) reset_now(void);
+static void set_reboot_bootloader(void);
+
 void exc_handler(uint64_t slot, uint64_t *regs)
 {
 	if (in_exception++)
-		for (;;)
-			__asm__ volatile("wfe");
+		reset_now();	/* a fault inside the handler: just get out */
 	log_printf("\n*** EXCEPTION slot %lu esr %lx elr %lx far %lx x0 %lx lr %lx\n", slot,
 		   rsr("esr_el1"), rsr("elr_el1"), rsr("far_el1"), regs[0], regs[30]);
 	show();
-	uint64_t end = ticks_now() + 19200000ULL * 20;
+#ifdef SHIM_EMMC
+	if (emmc_is_up()) {
+		int rc = emmc_save_log("klog", log_buf, log_len);
+		(void)rc;
+	}
+#endif
+	uint64_t end = ticks_now() + 19200000ULL * 10;
 	while (ticks_now() < end)
 		;
-	for (;;)
+	if (!spmi_init())
+		set_reboot_bootloader();
+	reset_now();
+}
+
+static void __attribute__((noreturn)) reset_now(void)
+{
+	for (;;) {
 		smc_call(PSCI_SYSTEM_RESET, 0, 0, 0);
+		__asm__ volatile("wfe");
+	}
 }
 
 void secondary_main(uint64_t idx)
@@ -203,6 +220,9 @@ static void emmc_test(void)
 		log_printf("emmc: fast mode rc %d\n", rc);
 		STEP();
 		if (!rc) {
+			rc = emmc_test_high();
+			log_printf("emmc: high-RAM ADMA64 test rc %d\n", rc);
+			STEP();
 			kb = emmc_bench(0x108e400, 64);
 			log_printf("emmc: bench 8-bit HS 50 MHz: %d kB/s\n", kb);
 			STEP();
@@ -217,6 +237,10 @@ static void emmc_test(void)
 	STEP();
 	if (rc || sec[0] != 'E' || esz != 128 || n > 256)
 		return;
+#ifndef SHIM_GPT_LIST
+	STEP();
+	return;
+#endif
 	unsigned shown = 0;
 	for (uint32_t s_i = 0; s_i < (n + 3) / 4 && shown < 80; s_i++) {
 		if (emmc_read(elba + s_i, ent))
@@ -338,21 +362,27 @@ void shim_main(uintptr_t dtb)
 	emmc_test();
 #endif
 	log_printf("probe done at %lu ms\n", ticks_now() / 19200);
+#ifdef SHIM_EMMC
+	{
+		/* The log goes to the 4 MiB "klog" partition (Android's own scratch); read it back with
+		 * tools/pull-shim-log.sh (fastbootd fetch), no camera needed. */
+		int src = emmc_save_log("klog", log_buf, log_len);
+		log_printf("log saved to klog: rc %d\n", src);
+	}
+#endif
 	STEP();
 	/* Proof of life without a readable screen: after RESET_AFTER_S the shim asks for a
 	 * reboot into the bootloader (PMIC PON reason + IMEM cookie, as flame does) and resets. */
 	uint64_t t0 = ticks_now(), end = t0 + 19200000ULL * RESET_AFTER_S;
-	uint32_t last = 0;
+	uint32_t last = 0xffffffffu;
 	while (ticks_now() < end) {
-		uint32_t sec = (uint32_t)((ticks_now() - t0) / 19200000ULL);
-		if (sec != last && sec % 3 == 0) {	/* keep the panel fed and the text on top */
-			last = sec;
-#ifdef SHIM_WDT_QUIET
-			wr32(WDT_BASE + WDT_RST, 1);
-#endif
+		uint32_t left = (uint32_t)((end - ticks_now()) / 19200000ULL) + 1;
+		if (left != last) {
+			last = left;
+			char msg[48];
+			fmt_snprintf(msg, sizeof(msg), "RESET IN %2u s     ", left);
 			sde_autorefresh(1);
-			log_printf("alive %us / %us\n", sec, (unsigned)RESET_AFTER_S);
-			show();
+			con_status(msg, YELLOW);
 		}
 	}
 	set_reboot_bootloader();

@@ -125,6 +125,19 @@ unsigned con_text(const char *s, unsigned len, uint32_t fg)
 	return i;
 }
 
+/* One line pinned to the last text row. Fixed width and no clearing: every glyph cell is repainted in place, so the
+ * panel never scans a half-cleared row. Callers pad s to a constant length. */
+void con_status(const char *s, uint32_t fg)
+{
+	int save = row;
+	row = con_rows() - 1;
+	unsigned n = 0;
+	while (s[n])
+		n++;
+	con_text(s, n, fg);
+	row = save;
+}
+
 void con_str(const char *label, const char *s)
 {
 	put_str(0, label, YELLOW);

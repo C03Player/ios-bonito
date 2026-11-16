@@ -9,3 +9,7 @@ int emmc_fast(void);	/* HS timing, 8-bit bus, 50 MHz */
 int emmc_bench(uint32_t lba, unsigned total_mib);	/* kB/s or negative error */
 const uint8_t *emmc_xfer_buf(void);
 int emmc_read_multi(uint32_t lba, unsigned n);	/* n <= 2048 sectors into emmc_xfer_buf() */
+int emmc_test_high(void);
+int emmc_find_partition(const char *name, uint32_t *first, uint32_t *count);
+int emmc_save_log(const char *part, const char *text, uint32_t len);	/* writes only inside that partition */
+int emmc_is_up(void);

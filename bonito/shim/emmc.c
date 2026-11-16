@@ -51,6 +51,7 @@ static inline void wr16(uintptr_t a, uint16_t v) { *(volatile uint16_t *)a = v; 
 #define S_SIGEN		0x38
 
 static uint32_t sectors;
+static int emmc_up;
 static uint32_t rca = 1;
 static int hc_card;	/* sector addressing */
 
@@ -298,28 +299,45 @@ int emmc_init(void)
 	sectors = extcsd[212] | extcsd[213] << 8 | extcsd[214] << 16 | (uint32_t)extcsd[215] << 24;
 	log_printf("emmc: sec_count %u (%u MiB) rev %u part_cfg %x bus_w %x hs %x boot_size %u KiB\n", sectors,
 		   sectors / 2048, extcsd[192], extcsd[179], extcsd[183], extcsd[185], extcsd[226] * 128);
+	emmc_up = 1;
 	return 0;
+}
+
+int emmc_is_up(void)
+{
+	return emmc_up;
 }
 
 
 /* ---- 8-bit high-speed mode and multi-block reads ---- */
 #define XFER_MAX_BLOCKS	2048	/* 1 MiB */
 static uint8_t xfer_buf[XFER_MAX_BLOCKS * 512] __attribute__((aligned(64)));
-static volatile uint64_t xfer_desc[XFER_MAX_BLOCKS * 512 / 0x8000 + 1] __attribute__((aligned(8)));
+static volatile uint64_t xfer_desc[XFER_MAX_BLOCKS * 512 / 0x8000 + 2] __attribute__((aligned(8)));
 
-/* Read n (1..2048) sectors starting at lba into xfer_buf through ADMA2 with CMD18 + auto CMD12. */
-static int xfer_read(uint32_t lba, unsigned n)
+/*
+ * Read n (1..2048) sectors at lba to physical address dst through ADMA2, CMD18 + auto CMD12.
+ * use64: 64-bit ADMA2 (DMA select 3, 12-byte descriptors) so dst and the descriptor table may lie above 4 GiB
+ * (XNU's RAM on bonito is entirely above 4 GiB); otherwise 32-bit ADMA2 (8-byte descriptors).
+ */
+static int xfer_read_x(uint32_t lba, unsigned n, uint64_t dst, uint64_t desc, int use64)
 {
 	if (!n || n > XFER_MAX_BLOCKS)
 		return -20;
-	unsigned bytes = n * 512, d = 0;
-	for (unsigned off = 0; off < bytes; off += 0x8000, d++) {
+	unsigned bytes = n * 512;
+	volatile uint32_t *d = (volatile uint32_t *)(uintptr_t)desc;
+	for (unsigned off = 0; off < bytes; off += 0x8000) {
 		unsigned len = bytes - off > 0x8000 ? 0x8000 : bytes - off;
-		uint64_t attr = 0x21 | (off + len >= bytes ? 0x2 : 0);
-		xfer_desc[d] = (uint64_t)(uint32_t)(uintptr_t)(xfer_buf + off) << 32 | (uint64_t)len << 16 | attr;
+		uint32_t attr = 0x21 | (off + len >= bytes ? 0x2 : 0);
+		uint64_t a = dst + off;
+		*d++ = attr | (uint32_t)len << 16;
+		*d++ = (uint32_t)a;
+		if (use64)
+			*d++ = (uint32_t)(a >> 32);
 	}
-	wr32(SDHCI + S_ADMA_ADDR, (uint32_t)(uintptr_t)xfer_desc);
-	wr8(SDHCI + S_HCTL, (rd8(SDHCI + S_HCTL) & ~0x18) | 0x10);
+	wr32(SDHCI + S_ADMA_ADDR, (uint32_t)desc);
+	if (use64)
+		wr32(SDHCI + S_ADMA_ADDR + 4, (uint32_t)(desc >> 32));
+	wr8(SDHCI + S_HCTL, (rd8(SDHCI + S_HCTL) & ~0x18) | (use64 ? 0x18 : 0x10));
 	wr16(SDHCI + S_BLK, 512);
 	wr16(SDHCI + S_BLK + 2, n);
 	wr16(SDHCI + S_TOUT, 0xe);
@@ -353,6 +371,35 @@ static int xfer_read(uint32_t lba, unsigned n)
 	}
 	wr32(SDHCI + S_INT, 0xffffffff);
 	return 0;
+}
+
+static int xfer_read(uint32_t lba, unsigned n)
+{
+	return xfer_read_x(lba, n, (uint64_t)(uintptr_t)xfer_buf, (uint64_t)(uintptr_t)xfer_desc, 0);
+}
+
+/* 64-bit ADMA2 into/through RAM above 4 GiB (descriptor table and data), compared with a low-memory read. */
+int emmc_test_high(void)
+{
+	const uint64_t desc = 0x110000000ULL, dst = 0x110100000ULL;
+	volatile uint8_t *p = (volatile uint8_t *)(uintptr_t)dst;
+	for (unsigned i = 0; i < 4096; i++)
+		p[i] = 0xa5;
+	int rc = xfer_read_x(1, 8, dst, desc, 1);	/* GPT header + first entries, 4 KiB */
+	if (rc)
+		return rc;
+	rc = xfer_read(1, 8);
+	if (rc)
+		return rc;
+	unsigned bad = 0, a5 = 0;
+	for (unsigned i = 0; i < 4096; i++) {
+		if (p[i] != xfer_buf[i])
+			bad++;
+		if (p[i] == 0xa5)
+			a5++;
+	}
+	log_printf("emmc: ADMA64 high RAM read: %u bytes differ, %u untouched, first %x %x\n", bad, a5, p[0], p[1]);
+	return bad ? -40 : 0;
 }
 
 static int switch_ext(uint32_t index, uint32_t value)
@@ -411,6 +458,130 @@ const uint8_t *emmc_xfer_buf(void)
 int emmc_read_multi(uint32_t lba, unsigned n)
 {
 	return xfer_read(lba, n);
+}
+
+/* ---- writes (scratch log partition only) and GPT lookup ---- */
+static uint32_t wr_lo, wr_n;	/* the only sectors emmc_write() will touch */
+
+/* Find a GPT partition by (ASCII) name. Returns 0 and its first LBA / sector count. */
+int emmc_find_partition(const char *want, uint32_t *first, uint32_t *count)
+{
+	static uint8_t sec[512], ent[512];
+	int rc = emmc_read(1, sec);
+	if (rc || sec[0] != 'E')
+		return -50;
+	uint32_t elba = sec[72] | sec[73] << 8 | sec[74] << 16 | (uint32_t)sec[75] << 24;
+	uint32_t n = sec[80] | sec[81] << 8 | sec[82] << 16 | (uint32_t)sec[83] << 24;
+	for (uint32_t i = 0; i < n; i++) {
+		if (!(i & 3) && emmc_read(elba + i / 4, ent))
+			return -51;
+		const uint8_t *e = ent + (i & 3) * 128;
+		unsigned k = 0;
+		for (; want[k] && e[56 + 2 * k] == (uint8_t)want[k] && !e[57 + 2 * k]; k++)
+			;
+		if (want[k] || e[56 + 2 * k])
+			continue;
+		uint32_t f = e[32] | e[33] << 8 | e[34] << 16 | (uint32_t)e[35] << 24;
+		uint32_t l = e[40] | e[41] << 8 | e[42] << 16 | (uint32_t)e[43] << 24;
+		*first = f;
+		*count = l - f + 1;
+		return 0;
+	}
+	return -52;
+}
+
+/* CMD25 multi-block write of n sectors from xfer_buf through 32-bit ADMA2. Bounds are checked here, every time. */
+static int xfer_write(uint32_t lba, unsigned n)
+{
+	if (!n || n > XFER_MAX_BLOCKS || !wr_n || lba < wr_lo || lba - wr_lo >= wr_n || n > wr_n - (lba - wr_lo)) {
+		log_printf("emmc: refusing write of %u at %u\n", n, lba);
+		return -60;
+	}
+	unsigned bytes = n * 512;
+	volatile uint32_t *d = (volatile uint32_t *)(uintptr_t)xfer_desc;
+	for (unsigned off = 0; off < bytes; off += 0x8000) {
+		unsigned len = bytes - off > 0x8000 ? 0x8000 : bytes - off;
+		*d++ = (0x21 | (off + len >= bytes ? 0x2 : 0)) | (uint32_t)len << 16;
+		*d++ = (uint32_t)(uintptr_t)(xfer_buf + off);
+	}
+	wr32(SDHCI + S_ADMA_ADDR, (uint32_t)(uintptr_t)xfer_desc);
+	wr8(SDHCI + S_HCTL, (rd8(SDHCI + S_HCTL) & ~0x18) | 0x10);
+	wr16(SDHCI + S_BLK, 512);
+	wr16(SDHCI + S_BLK + 2, n);
+	wr16(SDHCI + S_TOUT, 0xe);
+	if (wait_clear32(SDHCI + S_PRES, 3, 100))
+		return -10;
+	wr32(SDHCI + S_INT, 0xffffffff);
+	wr32(SDHCI + S_ARG, hc_card ? lba : lba * 512);
+	/* DMA | block count | auto CMD12 | multi-block, host -> card (bit 4 clear) */
+	wr32(SDHCI + S_CMD, (25u << 24) | (CF(R_48, 1, 1, 1) << 16) | 0x27);
+	uint64_t end = ticks_now() + 19200ULL * 3000;
+	uint32_t st;
+	for (;;) {
+		st = rd32(SDHCI + S_INT);
+		if (st & 0x8000)
+			break;
+		if (st & 2)
+			break;
+		if (ticks_now() > end) {
+			log_printf("emmc: write timeout int %x pres %x\n", st, rd32(SDHCI + S_PRES));
+			wr8(SDHCI + S_RST, 6);
+			wait_bit8(SDHCI + S_RST, 6, 0, 10);
+			return -11;
+		}
+	}
+	if (st & 0x8000) {
+		log_printf("emmc: write error int %x adma_err %x\n", st, rd32(SDHCI + S_ADMA_ERR));
+		wr32(SDHCI + S_INT, st);
+		wr8(SDHCI + S_RST, 6);
+		wait_bit8(SDHCI + S_RST, 6, 0, 10);
+		return -12;
+	}
+	wr32(SDHCI + S_INT, 0xffffffff);
+	/* wait until the card has finished programming: CMD13 state == transfer (4), READY_FOR_DATA */
+	end = ticks_now() + 19200ULL * 3000;
+	for (;;) {
+		uint32_t r[4] = { 0 };
+		if (!cmd(13, rca << 16, CF(R_48, 1, 1, 0), r) && (r[0] & 0x100) && ((r[0] >> 9) & 0xf) == 4)
+			return 0;
+		if (ticks_now() > end)
+			return -13;
+	}
+}
+
+/* Save a text log into the named scratch partition: sector 0 header "BNTLOG01", len, seq; text from sector 1. */
+int emmc_save_log(const char *part, const char *text, uint32_t len)
+{
+	uint32_t first, count;
+	int rc = emmc_find_partition(part, &first, &count);
+	if (rc)
+		return rc;
+	if (count < 8)
+		return -61;
+	wr_lo = first;
+	wr_n = count;
+	uint32_t room = (count - 1) * 512;
+	if (len > room)
+		len = room;
+	for (unsigned i = 0; i < 512; i++)
+		xfer_buf[i] = 0;
+	static const char magic[8] = "BNTLOG01";
+	for (unsigned i = 0; i < 8; i++)
+		xfer_buf[i] = (uint8_t)magic[i];
+	xfer_buf[8] = len;
+	xfer_buf[9] = len >> 8;
+	xfer_buf[10] = len >> 16;
+	xfer_buf[11] = len >> 24;
+	rc = xfer_write(first, 1);
+	for (uint32_t done = 0; !rc && done < len; ) {
+		uint32_t chunk = len - done > XFER_MAX_BLOCKS * 512 ? XFER_MAX_BLOCKS * 512 : len - done;
+		uint32_t secs = (chunk + 511) / 512;
+		for (uint32_t i = 0; i < secs * 512; i++)
+			xfer_buf[i] = i < chunk ? (uint8_t)text[done + i] : 0;
+		rc = xfer_write(first + 1 + done / 512, secs);
+		done += chunk;
+	}
+	return rc;
 }
 
 uint32_t emmc_sectors(void)
