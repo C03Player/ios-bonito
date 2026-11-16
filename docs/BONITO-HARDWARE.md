@@ -85,3 +85,16 @@ entirely above 4 GiB (ADT dram-base 0x100000000), so the eMMC DMA bounce buffer 
 0x80400000 (+2 MiB), free per the stock DTB's reserved-memory map (free from 0x80000000 to the hyp carve-out at 0x85700000, except the shim image
 at 0x80080000, DTB 0x84500000 and ramdisk 0x84700000). Low-RAM 32-bit ADMA2 DMA is proven (the shim's own buffers at ~0x80xxxxxx).
 Also: fastbootd `fetch` is refused on this user build ("Fetch is not allowed on user build"), so partition read-back over fastboot is not possible.
+
+## XNU reads the eMMC (2026-11-16, kernel with patch 0126, boot-args `... rd=ufsroot0`, read-only)
+Photo of the screen: `BSD root: ufsroot0, major 1, minor 0` (the driver found GPT partition "userdata" and registered the block device), then
+`hfs_ValidateHFSPlusVolumeHeader: unknown Volume Signature : 677d`, `hfs_mount: hfs_mountfs returned error=22`, `cannot mount root, errno = 19`, and the
+kernel retries `mount(29)..(36)...` in a loop. Expected: userdata still holds Android's filesystem. So the whole storage path works from XNU: SDCC clock,
+power handshake, card init, 8-bit HS 50 MHz, ADMA2 reads through the low-RAM window at 0x80400000, GPT lookup, bdevsw/cdevsw, HFS+ header read.
+Not yet seen: the "SWEET EMMC:" init lines themselves (they had scrolled off) and any write.
+
+## Environment notes
+- The dev container runs rootless/with a user namespace (uid_map 0 1000 1; no CAP_SYS_ADMIN): losetup and kernel HFS+ mounts are refused inside it
+  even with /dev/loop0 and /dev/fuse passed in. mkfs.hfsplus and apfs-fuse (FUSE) are usable. The privileged part of the root-image build has to run
+  on the Pi host as real root (or in a rootful container).
+- After a host reboot, block device letters can change (the USB stick was sde, became sda): mount it by UUID.
