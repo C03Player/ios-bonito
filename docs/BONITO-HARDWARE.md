@@ -62,3 +62,12 @@ Status key: **[LIVE]** read on the phone by the probe shim (photo `logs/BONITOSH
 
 ## Not yet examined
 GPU (Adreno 615), audio (cs35l36 + WCD9xxx), Wi-Fi/BT (WCN3990), USB (DWC3 + QUSB2), cpufreq, battery, regulators/clocks, SMMU.
+
+## First XNU boot (2026-11-16, kernel built by CI from patches 0001-0125, boot-args `debug=0xc serial=3 cpus=1 keepsyms=1 -v wdt=-1 -enable_kprintf_spam`)
+Reached by `fastboot boot` of shim + payload (ramdisk). Photo of the screen, confirmed on the phone:
+- shim -> loader -> XNU entry works (payload copied to the 2nd RAM bank at 0x100000000, ADT from bonito/tools/mkadt.py, early console on the splash fb 0x9c000000 1080x2160).
+- CPU 0 comes up at EL1 (mpidr 0x0), GIC SGI1 self-test passes, arch timer works. cpus=1 only: SMP not tried.
+- PM660 RTC readable through the SPMI arbiter with flame's PM8xxx RTC offsets (0x6046 ctrl = 0x80, 0x6048 data): 1822710 s.
+- AMFI/Sandbox stand-ins, HFS, networking stack, skywalk self-tests, MAC framework all initialise.
+- Stops at `Waiting on IOMedia Apple_HFS` (no root device). The phone does not reset: with XNU not touching the APSS WDT (patch 0125) the
+  phone ran >= the whole observation without a watchdog bite, so the earlier early resets were caused by the shim's own writes to 0x17980000.

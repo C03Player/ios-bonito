@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include "console.h"
 #include "fdt.h"
+#include "loader.h"
 #include "log.h"
 #include "emmc.h"
 #include "sde.h"
@@ -296,6 +297,17 @@ void shim_main(uintptr_t dtb)
 	}
 	sde_autorefresh(1);
 	STEP();
+	/* An XNU payload (tools/mkpayload.py) in the ramdisk means: boot it instead of probing. */
+	if (loader_has_payload(dtb)) {
+		struct loader_fb lfb = { fb, stride, FB_W, FB_H, 0 };
+		log_printf("payload found, booting xnu\n");
+		STEP();
+		const char *why = loader_boot(dtb, &lfb);
+		log_printf("loader: %s\n", why);
+		STEP();
+		for (;;)
+			__asm__ volatile("wfe");
+	}
 	STAGE(3);
 
 	if (!spmi_init()) {

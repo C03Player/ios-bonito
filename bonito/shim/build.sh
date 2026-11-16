@@ -14,7 +14,7 @@ ROOT=$(cd ../.. && pwd)
 CC="${CC:-clang} --target=aarch64-none-elf"
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-builtin -fno-pic -fno-pie -mgeneral-regs-only -mstrict-align
 	-fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra ${SHIM_CFLAGS:-}"
-SRCS="start.S shim.c console.c log.c util.c fdt.c spmi.c sde.c emmc.c"
+SRCS="start.S shim.c console.c log.c util.c fdt.c spmi.c sde.c emmc.c loader.c"
 mkdir -p out
 objs=
 for f in $SRCS; do
@@ -28,7 +28,11 @@ llvm-objcopy -O binary out/shim.elf out/Image
 size=$(llvm-nm out/shim.elf | awk '$3=="_end"{print $1}')
 truncate -s $((16#$size)) out/Image
 lz4 -q -9 -B7 -f out/Image out/Image.lz4
-(cd out && rm -rf rd && mkdir rd && cd rd && find . | cpio -o -H newc --quiet 2>/dev/null | gzip -9 > ../ramdisk.bin)
+if [ -n "${PAYLOAD:-}" ]; then
+	cp "$PAYLOAD" out/ramdisk.bin	# tools/mkpayload.py output: the shim boots it
+else
+	(cd out && rm -rf rd && mkdir rd && cd rd && find . | cpio -o -H newc --quiet 2>/dev/null | gzip -9 > ../ramdisk.bin)
+fi
 OUT=${1:-out/shim-boot.img}
 if [ -f "$ROOT/downloads/mkbootimg/mkbootimg.py" ] && [ -f "$ROOT/stock/unpacked/dtb" ]; then
 	PYTHONPATH="$ROOT/downloads/mkbootimg" python3 "$ROOT/downloads/mkbootimg/mkbootimg.py" \

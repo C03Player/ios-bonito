@@ -1,7 +1,7 @@
 # bonito port map (from ios-flame @ 745c434 / ios-sweet @ 45263be)
 
 **Confirmed** = observed on the phone or in the stock DTB/DTBO (see BONITO-HARDWARE.md). **Assumed** = not verified.
-Nothing below has booted XNU on bonito. The XNU build needs macOS + Xcode (blacktop/darwin-xnu-build); this Linux/arm64 host can
+**XNU (xnu-8796, patched 0001-0125, DEVELOPMENT, SWEET machine config, built by CI) boots on bonito as of 2026-11-16: it runs on CPU 0 with the on-screen console and stops at "Waiting on IOMedia Apple_HFS" because there is no storage driver / root yet. No iOS userland has run.** The XNU build needs macOS + Xcode (blacktop/darwin-xnu-build); this Linux/arm64 host can
 only build and test the shim.
 
 ## Boot flow (confirmed up to the shim)
