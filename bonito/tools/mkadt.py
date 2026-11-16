@@ -38,6 +38,8 @@ SWEET_ECID = 0x5357454554000001  # 'SWEET' + 1, synthetic
 FB_W, FB_H, FB_STRIDE = 1080, 2160, 1080 * 4
 # Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x01d84000, 0x3000
+# Internal eMMC host (sdhci@7c4000, qcom,sdhci-msm-v5); read back live on the phone (docs/BONITO-HARDWARE.md)
+EMMC, EMMC_SIZE = 0x007c4000, 0x1000
 TIMEBASE = 19200000
 VTIMER_INTID = 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
@@ -225,6 +227,13 @@ def build(seed=None, qemu=False, highmem=False):
         ('reg', u64(UFS, UFS_SIZE)),
     ])
 
+    # bsd/dev/sweet_ufs.c (bonito patch 0126): the eMMC host ABL leaves shut down (absolute physical reg).
+    emmc = node('sweet-emmc', [
+        ph(),
+        ('compatible', cstr('qcom,sdhci-msm-v5')),
+        ('reg', u64(EMMC, EMMC_SIZE)),
+    ])
+
     # pmap_compute_max_asids requires the node even when no overrides are set.
     # An absent pmap-max-asids property selects XNU's own MAX_ASIDS default.
     # No effaceable storage: keybagd then reads /private/var/keybags/systembag.kb
@@ -255,7 +264,7 @@ def build(seed=None, qemu=False, highmem=False):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [pram]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [emmc, pram]))
 
 
 if __name__ == '__main__':
