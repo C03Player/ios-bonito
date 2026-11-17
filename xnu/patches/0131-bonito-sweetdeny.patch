@@ -1,0 +1,67 @@
+diff --git a7/bsd/kern/kern_exec.c b7/bsd/kern/kern_exec.c
+index 68612db..6266238 100644
+--- a7/bsd/kern/kern_exec.c
++++ b7/bsd/kern/kern_exec.c
+@@ -2128,6 +2128,41 @@ struct execsw {
+  *	<ex_imgact>:???			[anything an imgact can return]
+  *	EDEADLK				Process is being terminated
+  */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * Boot-arg sweetdeny=WORD[,WORD...] (from ios-sailfish patch 0182): exec of any file whose name contains one of the
++ * words fails with EACCES before the point of no return (a later failure would SIGKILL the spawner, launchd). Used on
++ * bonito to keep radio daemons that crash instantly (no hardware) from tripping launchd's "unexpected exec of
++ * non-platform binary" panic, without editing launchd.plist in the root image.
++ */
++static bool
++sweet_exec_denied(const char *name)
++{
++	static char list[256];
++	static int state;       /* 0 not parsed, 1 none, 2 set */
++	if (state == 0) {
++		state = PE_parse_boot_argn("sweetdeny", list, sizeof(list)) && list[0] ? 2 : 1;
++	}
++	for (const char *w = list; state == 2 && *w;) {
++		size_t n = 0;
++		while (w[n] && w[n] != ',') {
++			n++;
++		}
++		char word[64];
++		/* >= 4: a word cut short by the 608-byte boot-args limit must not match everything */
++		if (n >= 4 && n < sizeof(word)) {
++			memcpy(word, w, n);
++			word[n] = '\0';
++			if (strnstr(name, word, strlen(name) + 1) != NULL) {
++				return true;
++			}
++		}
++		w += n + (w[n] == ',');
++	}
++	return false;
++}
++#endif
++
+ static int
+ exec_activate_image(struct image_params *imgp)
+ {
+@@ -2197,6 +2232,20 @@ again:
+ 	}
+ 
+ 	error = exec_check_permissions(imgp);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (error == 0) {
++		const char *path = imgp->ip_strings + strlen("executable_path="), *base = path;
++		for (const char *c = path; *c; c++) {
++			if (*c == '/') {
++				base = c + 1;
++			}
++		}
++		if (sweet_exec_denied(base)) {
++			printf("exec %s denied (sweetdeny)\n", base);
++			error = EACCES;
++		}
++	}
++#endif
+ 	if (error) {
+ 		goto bad;
+ 	}
