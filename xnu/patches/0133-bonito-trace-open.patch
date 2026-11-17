@@ -1,0 +1,59 @@
+diff --git a9/bsd/vfs/vfs_syscalls.c b9/bsd/vfs/vfs_syscalls.c
+index 6b27234..9dcc150 100644
+--- a9/bsd/vfs/vfs_syscalls.c
++++ b9/bsd/vfs/vfs_syscalls.c
+@@ -4522,6 +4522,41 @@ fg_vn_data_free(void *fgvndata)
+  *
+  * XXX Need to implement uid, gid
+  */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * Boot-arg sweettrace=WORD[,WORD...]: print every open() whose path contains one of the words (>= 3 characters):
++ * "SWEET OPEN name[pid] path flags 0x.. -> errno". For finding which files a crashing daemon cannot open.
++ */
++static void
++sweet_trace_open(proc_t p, const char *path, int oflags, int error)
++{
++	static char list[200];
++	static int state;       /* 0 not parsed, 1 off, 2 on */
++	if (state == 0) {
++		state = PE_parse_boot_argn("sweettrace", list, sizeof(list)) && list[0] ? 2 : 1;
++	}
++	if (state != 2 || path == NULL) {
++		return;
++	}
++	for (const char *w = list; *w;) {
++		size_t n = 0;
++		while (w[n] && w[n] != ',') {
++			n++;
++		}
++		char word[48];
++		if (n >= 3 && n < sizeof(word)) {
++			memcpy(word, w, n);
++			word[n] = '\0';
++			if (strnstr(path, word, strlen(path) + 1) != NULL) {
++				printf("SWEET OPEN %s[%d] %s flags 0x%x -> %d\n", p->p_comm, proc_getpid(p), path, oflags, error);
++				return;
++			}
++		}
++		w += n + (w[n] == ',');
++	}
++}
++#endif
++
+ int
+ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
+     struct vnode_attr *vap, fp_initfn_t fp_init, void *initarg, int32_t *retval, int authfd)
+@@ -4583,7 +4618,11 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
+ 		}
+ 	}
+ 
+-	if ((error = vn_open_auth(ndp, &flags, vap, authvp))) {
++	error = vn_open_auth(ndp, &flags, vap, authvp);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	sweet_trace_open(p, ndp->ni_cnd.cn_pnbuf, flags, error);
++#endif
++	if (error) {
+ 		if (authvp != NULLVP) {
+ 			vnode_put(authvp);
+ 		}
