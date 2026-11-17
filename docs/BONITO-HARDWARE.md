@@ -98,3 +98,14 @@ Not yet seen: the "SWEET EMMC:" init lines themselves (they had scrolled off) an
   even with /dev/loop0 and /dev/fuse passed in. mkfs.hfsplus and apfs-fuse (FUSE) are usable. The privileged part of the root-image build has to run
   on the Pi host as real root (or in a rootful container).
 - After a host reboot, block device letters can change (the USB stick was sde, became sda): mount it by UUID.
+
+## MILESTONE 2026-11-17: Apple's iOS 16.7.16 launchd runs on bonito
+Kernel = CI run 43985995061 (patches 0001-0128), boot-args `debug=0xc serial=3 cpus=1 keepsyms=1 -v wdt=-1 -enable_kprintf_spam rd=ufsroot0 ufsrw=1 rootrw=1
+sweetlog=0 sweetusb=0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1`, root = the 16 GiB HFS+ image built from the
+iPhone X (iPhone10,3) 20H392 IPSW (bonito/tools/build-ios-root.sh) flashed to userdata with bonito/tools/flash-sparse.py (1176 s). Photo BOOTSHIM16: `hello` from
+com.apple.xpc.launchd ("Darwin Bootstrapper Version 7.0.0 ... libxpc_executables-2462.140.4.702.1~1/launchd/RELEASE_ARM64"), boot task "mount-phase-1", `exec mount`,
+`exec mount_hfs`, then a stream of `shared_region ... dyld_shared_cache_arm64.NN ... not in trust cache` (processes mapping the dyld shared cache). So: eMMC read AND write path
+(journal init, rootrw) work in XNU, HFS+ root mounts, Apple's launchd/dyld run. One CPU core, no GPU, no touch, no USB link yet. Not yet seen: SpringBoard / home screen.
+
+Flashing note: Debian's fastboot 29 / libsparse (img2simg) silently sent 0 KB for the 16 GiB raw image while reporting success. bonito/tools/flash-sparse.py writes
+Android sparse files itself (window by window, RAW + FILL(0) + DONT_CARE) and checks every `fastboot flash`; it flashed the image correctly. Always check the "Sending ... (N KB)" size.
