@@ -1,0 +1,46 @@
+diff --git a10/bsd/dev/arm/systemcalls.c b10/bsd/dev/arm/systemcalls.c
+--- a10/bsd/dev/arm/systemcalls.c
++++ b10/bsd/dev/arm/systemcalls.c
+@@ -135,6 +135,34 @@
+ 	sweet_sys_ring[i].err = (int16_t)error;
+ }
+ 
++/*
++ * Same sweetfail processes: a getattrlist-family call that fails with EINVAL prints its path (or fd) and the attribute
++ * bitmaps it asked for. uu_arg[]: 220 getattrlist(path, alist, buf, size, options), 228 fgetattrlist(fd, alist, ...).
++ */
++void sweet_sys_attr(proc_t p, unsigned code, int error, const uint64_t *arg);
++void
++sweet_sys_attr(proc_t p, unsigned code, int error, const uint64_t *arg)
++{
++	if (error != EINVAL || (code != 220 && code != 228) || !sweet_sys_wanted(p->p_comm)) {
++		return;
++	}
++	struct {
++		uint16_t count, reserved;
++		uint32_t cmn, vol, dir, file, fork;
++	} al = { 0 };
++	char path[96] = "";
++	size_t done = 0;
++	if (code == 220) {
++		(void)copyinstr((user_addr_t)arg[0], path, sizeof(path), &done);
++	} else {
++		snprintf(path, sizeof(path), "fd %d", (int)arg[0]);
++	}
++	int e = copyin((user_addr_t)arg[1], &al, sizeof(al));
++	printf("SWEET ATTR %s[%d] %s EINVAL %s cnt %u cmn 0x%x vol 0x%x dir 0x%x file 0x%x fork 0x%x opts 0x%llx (copyin %d)\n",
++	    p->p_comm, proc_getpid(p), code == 220 ? "getattrlist" : "fgetattrlist", path, al.count, al.cmn, al.vol, al.dir,
++	    al.file, al.fork, (unsigned long long)arg[4], e);
++}
++
+ void sweet_sys_dump(const char *name, int pid);
+ void
+ sweet_sys_dump(const char *name, int pid)
+@@ -269,6 +297,7 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	if (__improbable(error != 0)) {
+ 		sweet_sys_note(proc, code, error);
++		sweet_sys_attr(proc, code, error, &uthread->uu_arg[0]);
+ 	}
+ #endif
+ 	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
