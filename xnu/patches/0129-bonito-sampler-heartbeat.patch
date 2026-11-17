@@ -1,0 +1,12 @@
+diff --git a5/bsd/dev/sweet_ufs.c b5/bsd/dev/sweet_ufs.c
+index 61fe54a..b880ada 100644
+--- a5/bsd/dev/sweet_ufs.c
++++ b5/bsd/dev/sweet_ufs.c
+@@ -784,6 +784,7 @@ sweet_ufs_init(void)
+ 	    want, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	sweet_log_start();
++	sweet_sample_start();   /* console heartbeat + where the watched processes wait (boot-arg sweetsample=a,b,c; "-" = off): bsd/dev/sweet_sample.c */
+ 	sweet_usb_probe();      /* boot-arg sweetusb=2 (+ sweetusbdma=<low PA>) starts the USB Ethernet gadget: bsd/dev/sweet_usb.c */
+ 	{
+ 		/* sweetusbhold=N: keep the console quiet for N seconds so the USB messages stay on screen (debug) */
