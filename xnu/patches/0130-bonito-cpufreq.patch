@@ -1,0 +1,42 @@
+diff --git a6/bsd/dev/sweet_cpufreq.c b6/bsd/dev/sweet_cpufreq.c
+index 82097a3..a32f359 100644
+--- a6/bsd/dev/sweet_cpufreq.c
++++ b6/bsd/dev/sweet_cpufreq.c
+@@ -1,5 +1,5 @@
+ /*
+- * flame (SM8150) CPU frequency: the OSM hardware DCVS keeps a frequency
++ * bonito (SDM670, ported from the SM8150 flame driver) CPU frequency: the OSM hardware DCVS keeps a frequency
+  * table per cluster and takes a desired table index per cluster; voltage
+  * (CPR) and thermal limits (LMh) stay in hardware. ABL leaves the clusters
+  * slow and nothing under XNU raises them. Linux: drivers/clk/qcom/
+@@ -23,13 +23,15 @@ void sweet_cpufreq_init(void);
+ #define OSM_DESIRED     0x920u          /* + 4 * core in cluster; core 0 drives the policy */
+ #define OSM_XO_KHZ      19200u
+ 
++/* bonito (SDM670): qcom,cpucc@17d41000 "qcom,clk-cpu-osm-sdm670", reg-names osm_l3_base, osm_pwrcl_base, osm_perfcl_base.
++ * Same V2 register layout as flame (clk-cpu-osm.c: FREQ_REG 0x110 + 32 per row, DCVS_PERF_STATE_DESIRED_REG_0_V2 0x920).
++ * The L3 block (0x17d41000) is not touched. */
+ static const struct {
+ 	const char *name;
+ 	uint32_t pa;
+ } osm_clusters[] = {
+-	{"pwrcl (A55 x4)", 0x18323000u},
+-	{"perfcl (A76 x3)", 0x18325800u},
+-	{"perfpcl (A76 prime)", 0x18327800u},
++	{"pwrcl (6x Kryo 360 Silver)", 0x17d43000u},
++	{"perfcl (2x Kryo 360 Gold)", 0x17d45800u},
+ };
+ 
+ static uint32_t
+diff --git a6/bsd/dev/sweet_ufs.c b6/bsd/dev/sweet_ufs.c
+index b880ada..b50053d 100644
+--- a6/bsd/dev/sweet_ufs.c
++++ b6/bsd/dev/sweet_ufs.c
+@@ -784,6 +784,7 @@ sweet_ufs_init(void)
+ 	    want, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	sweet_log_start();
++	sweet_cpufreq_init();   /* raise the CPU clusters from the bootloader low default (boot-arg flamecpufreq=0 leaves them): bsd/dev/sweet_cpufreq.c */
+ 	sweet_sample_start();   /* console heartbeat + where the watched processes wait (boot-arg sweetsample=a,b,c; "-" = off): bsd/dev/sweet_sample.c */
+ 	sweet_usb_probe();      /* boot-arg sweetusb=2 (+ sweetusbdma=<low PA>) starts the USB Ethernet gadget: bsd/dev/sweet_usb.c */
+ 	{
