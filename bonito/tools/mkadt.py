@@ -57,6 +57,10 @@ BOOT_MANIFEST_HASH = hashlib.sha384(b'sweet boot manifest').digest()
 D22AP_ADT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../research/ipsw-x/d22ap.adt')
 
 
+# Presented screen size. 1125x2436 (iPhone X) has no BoundingPathBitmap in UIKitCore's BoundingPathData.bundle
+# (SpringBoard aborts); CANVAS=1170x2532 (iPhone 12/13, same aspect ratio) has one. Env CANVAS=WxH overrides.
+CANVAS_W, CANVAS_H = (int(v) for v in os.environ.get('CANVAS', '1125x2436').split('x'))
+
 def d22ap_product(path=D22AP_ADT):
     """/product properties of the real D22AP tree, without the syscfg
     placeholders iBoot would fill in (flag bit set) and the node bookkeeping."""
@@ -204,8 +208,8 @@ def build(seed=None, qemu=False, highmem=False):
             ph(),
             ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
-            ('canvas-width', u32(1125)),
-            ('canvas-height', u32(2436)),
+            ('canvas-width', u32(CANVAS_W)),
+            ('canvas-height', u32(CANVAS_H)),
         ])])
 
     fbcon = node('sweet-fbcon', [
