@@ -1,0 +1,125 @@
+diff --git a10/bsd/dev/arm/systemcalls.c b10/bsd/dev/arm/systemcalls.c
+index 7fd9be1..e1501ab 100644
+--- a10/bsd/dev/arm/systemcalls.c
++++ b10/bsd/dev/arm/systemcalls.c
+@@ -79,6 +79,93 @@ __XNU_PRIVATE_EXTERN    int             syscalls_log[SYS_MAXSYSCALL];
+ extern int mach_trap_count;
+ #endif
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <machine/atomic.h>
++/*
++ * Boot-arg sweetfail=NAME[,NAME...]: remember the last failing system calls (number and errno) of processes with
++ * those names, and print them when one of them crashes (sweet_crash_log): which call failed right before an abort.
++ * Syscall numbers are bsd/kern/syscalls.master (3 read, 5 open, 6 close, 197 mmap, ...).
++ */
++#define SWEET_SYS_N 96
++struct sweet_sys_ent {
++	int32_t  pid;
++	uint16_t code;
++	int16_t  err;
++};
++static struct sweet_sys_ent sweet_sys_ring[SWEET_SYS_N];
++static uint32_t _Atomic sweet_sys_head;
++static char sweet_sys_names[96];
++static int sweet_sys_state;     /* 0 not parsed, 1 off, 2 on */
++
++static bool
++sweet_sys_wanted(const char *comm)
++{
++	if (sweet_sys_state == 0) {
++		sweet_sys_state = PE_parse_boot_argn("sweetfail", sweet_sys_names, sizeof(sweet_sys_names)) &&
++		    sweet_sys_names[0] ? 2 : 1;
++	}
++	if (sweet_sys_state != 2) {
++		return false;
++	}
++	size_t n = strlen(comm);
++	for (const char *w = sweet_sys_names; *w;) {
++		const char *end = strchr(w, ',');
++		size_t wl = end ? (size_t)(end - w) : strlen(w);
++		if (wl == n && n > 0 && strncmp(w, comm, n) == 0) {
++			return true;
++		}
++		if (!end) {
++			break;
++		}
++		w = end + 1;
++	}
++	return false;
++}
++
++void sweet_sys_note(proc_t p, unsigned code, int error);
++void
++sweet_sys_note(proc_t p, unsigned code, int error)
++{
++	if (error == ERESTART || error == EJUSTRETURN || !sweet_sys_wanted(p->p_comm)) {
++		return;
++	}
++	uint32_t i = os_atomic_inc_orig(&sweet_sys_head, relaxed) % SWEET_SYS_N;
++	sweet_sys_ring[i].pid = proc_getpid(p);
++	sweet_sys_ring[i].code = (uint16_t)code;
++	sweet_sys_ring[i].err = (int16_t)error;
++}
++
++void sweet_sys_dump(const char *name, int pid);
++void
++sweet_sys_dump(const char *name, int pid)
++{
++	if (sweet_sys_state != 2 || !sweet_sys_wanted(name)) {
++		return;
++	}
++	uint32_t head = os_atomic_load(&sweet_sys_head, relaxed);
++	uint32_t first = head > SWEET_SYS_N ? head - SWEET_SYS_N : 0;
++	char line[160];
++	int len = 0, shown = 0;
++	printf("FAIL RING %s[%d] failing syscalls (number:errno), oldest first:\n", name, pid);
++	for (uint32_t k = first; k < head; k++) {
++		const struct sweet_sys_ent *e = &sweet_sys_ring[k % SWEET_SYS_N];
++		if (e->pid != pid) {
++			continue;
++		}
++		len += snprintf(line + len, sizeof(line) - len, " %u:%d", e->code, e->err);
++		if (len > (int)sizeof(line) - 16) {
++			printf("FAIL%s\n", line);
++			len = 0;
++		}
++		shown++;
++	}
++	if (len) {
++		printf("FAIL%s\n", line);
++	}
++	printf("FAIL RING end (%d entries)\n", shown);
++}
++#endif
++
+ /*
+  * Function:	unix_syscall
+  *
+@@ -179,6 +266,11 @@ unix_syscall(
+ 
+ 	AUDIT_SYSCALL_ENTER(code, proc, uthread);
+ 	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (__improbable(error != 0)) {
++		sweet_sys_note(proc, code, error);
++	}
++#endif
+ 	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
+ 
+ #if CONFIG_MACF
+diff --git a10/osfmk/kern/exception.c b10/osfmk/kern/exception.c
+index a20a764..4423c40 100644
+--- a10/osfmk/kern/exception.c
++++ b10/osfmk/kern/exception.c
+@@ -838,6 +838,10 @@ static void sweet_crash_strings(const char *name);
+ void
+ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subcode)
+ {
++	{
++		extern void sweet_sys_dump(const char *, int);
++		sweet_sys_dump(name, pid);
++	}
+ 	thread_t thread = current_thread();
+ 	task_t task = current_task();
+ 	arm_saved_state_t *ss = find_user_regs(thread);
