@@ -1,0 +1,33 @@
+diff --git a8/iokit/Kernel/arm/SweetKeyStore.cpp b8/iokit/Kernel/arm/SweetKeyStore.cpp
+index 73d9267..148d9bd 100644
+--- a8/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b8/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -22,6 +22,7 @@
+ #include <IOKit/IOKitKeys.h>
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOMemoryDescriptor.h>
++#include <pexpert/pexpert.h>
+ #include <libkern/c++/OSString.h>
+ #include <sys/proc.h>
+ 
+@@ -277,8 +278,18 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 
+ 	char name[32];
+ 	proc_selfname(name, sizeof(name));
+-	IOLog("SWEET AKS: %s sel %u arg0 %llu in %u/%u out %u/%u -> 0x%x\n", name, selector,
+-	    arg0, in_scalars, in_struct, out_scalars, out_struct, ret);
++	/* bonito: quiet by default (every daemon calls this constantly and the lines pushed the CRASH lines off the
++	 * screen); boot-arg sweetaks=1 logs every call, and unsupported selectors are always logged. */
++	static int aks_verbose = -1;
++	if (aks_verbose < 0) {
++		int v = 0;
++		PE_parse_boot_argn("sweetaks", &v, sizeof(v));
++		aks_verbose = v;
++	}
++	if (aks_verbose || ret != kIOReturnSuccess) {
++		IOLog("SWEET AKS: %s sel %u arg0 %llu in %u/%u out %u/%u -> 0x%x\n", name, selector,
++		    arg0, in_scalars, in_struct, out_scalars, out_struct, ret);
++	}
+ 	return ret;
+ }
+ #endif /* SWEET */
