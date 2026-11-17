@@ -1,0 +1,131 @@
+diff --git a4/bsd/dev/sweet_ufs.c b4/bsd/dev/sweet_ufs.c
+index 9607f5a..61fe54a 100644
+--- a4/bsd/dev/sweet_ufs.c
++++ b4/bsd/dev/sweet_ufs.c
+@@ -785,6 +785,15 @@ sweet_ufs_init(void)
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	sweet_log_start();
+ 	sweet_usb_probe();      /* boot-arg sweetusb=2 (+ sweetusbdma=<low PA>) starts the USB Ethernet gadget: bsd/dev/sweet_usb.c */
++	{
++		/* sweetusbhold=N: keep the console quiet for N seconds so the USB messages stay on screen (debug) */
++		uint32_t hold = 0;
++		PE_parse_boot_argn("sweetusbhold", &hold, sizeof(hold));
++		for (uint32_t i = 0; i < hold; i++) {
++			assert_wait_timeout((event_t)&su, THREAD_UNINT, 1000, NSEC_PER_MSEC);
++			thread_block(THREAD_CONTINUE_NULL);
++		}
++	}
+ 	/* flame-only hardware (SM8150 OSM cpufreq, PM8150 keys, ST FTS touch, Adreno 640, flame USB offsets, ...) is
+ 	 * not started on bonito: each needs its own port first. */
+ 	return 0;
+diff --git a4/bsd/dev/sweet_usb.c b4/bsd/dev/sweet_usb.c
+index 7ebab10..f543bec 100644
+--- a4/bsd/dev/sweet_usb.c
++++ b4/bsd/dev/sweet_usb.c
+@@ -1216,74 +1216,52 @@ ud_smmu_setup(uint64_t dma_pa)
+ }
+ 
+ /*
+- * flame: the Synopsys femto HS PHY of the primary port (hsphy@88e2000, the
+- * DWC3 node's usb-phy; 88e3000 is the second, disabled controller's). ABL runs fastboot at
+- * SuperSpeed and leaves this PHY in an unknown power state; the device
+- * controller ran but no host ever saw a connection. Same register sequence
+- * as Linux qcom_snps_hsphy_init (phy-qcom-snps-femto-v2.c) minus the
+- * regulators and the GCC block reset.
++ * bonito: the HS PHY of the primary DWC3 is a Qualcomm QUSB2 PHY (qusb@88e2000, phy-msm-qusb-v2.c), not flame's
++ * Synopsys femto PHY. ABL runs fastboot and leaves it in a state in which, once the DWC3 core is reset for our
++ * gadget, no host sees a connection (the symptom flame's notes describe too). Same sequence as Linux
++ * qusb_phy_init: the DT's qcom,qusb-phy-init-seq ((value, offset) pairs, B4 DTBO fragment, PORT_TUNE1 = 0x73),
++ * the last write releases POWER_DOWN in PWR_CTRL1; then wait for the PLL to lock (PLL_STATUS bit 5).
++ * Regulators and the GCC block reset are not touched (ABL left them on).
+  */
+ #define HSPHY_PA        0x088e2000
+-#define HP_UTMI_CTRL0   0x3c
+-#define HP_UTMI_CTRL5   0x50
+-#define HP_COMMON0      0x54
+-#define HP_COMMON1      0x58
+-#define HP_COMMON2      0x5c
+-#define HP_CTRL1        0x60
+-#define HP_CTRL2        0x64
+-#define HP_CFG0         0x94
+-#define HP_REFCLK       0xa0
+-
+-static void
+-hp_rmw(vm_offset_t p, uint32_t off, uint32_t mask, uint32_t val)
+-{
+-	uint32_t v = usb_rd(p, off);
+-	*(volatile uint32_t *)(p + off) = (v & ~mask) | (val & mask);
+-	__asm__ volatile ("dsb sy" ::: "memory");
+-}
+-
+-static void
+-ud_hsphy_dump(vm_offset_t p, const char *when)
+-{
+-	printf("SWEET USB: hsphy %s: utmi0 %x utmi5 %x common0 %x common1 %x common2 %x ctrl1 %x ctrl2 %x cfg0 %x refclk %x\n",
+-	    when, usb_rd(p, HP_UTMI_CTRL0), usb_rd(p, HP_UTMI_CTRL5), usb_rd(p, HP_COMMON0),
+-	    usb_rd(p, HP_COMMON1), usb_rd(p, HP_COMMON2), usb_rd(p, HP_CTRL1), usb_rd(p, HP_CTRL2),
+-	    usb_rd(p, HP_CFG0), usb_rd(p, HP_REFCLK));
+-}
++#define QP_PWR_CTRL1    0x210
++#define QP_PORT_TUNE1   0x240
++#define QP_PLL_STATUS   0x1a0
++#define QP_PLL_LOCKED   (1u << 5)
++
++static const uint16_t qusb_seq[][2] = {
++	{ 0x23, 0x210 }, { 0x03, 0x04 }, { 0x7c, 0x18c }, { 0x80, 0x2c }, { 0x0a, 0x184 }, { 0x19, 0xb4 },
++	{ 0x40, 0x194 }, { 0x20, 0x198 }, { 0x21, 0x214 }, { 0x08, 0x220 }, { 0x58, 0x224 }, { 0x73, 0x240 },
++	{ 0x29, 0x244 }, { 0xca, 0x248 }, { 0x04, 0x24c }, { 0x03, 0x250 }, { 0x00, 0x23c }, { 0x22, 0x210 },
++};
+ 
+ static void
+ ud_hsphy_init(void)
+ {
+-	/* bonito: off by default. The HS PHY at 0x88e2000 is a QUSB2 PHY here, not flame's femto PHY (different registers), and ABL
+-	 * leaves it powered (the host kept seeing the phone as a USB device while the shim ran). */
+-	int doinit = 0;
++	int doinit = 1;
+ 	PE_parse_boot_argn("sweethsphy", &doinit, sizeof(doinit));
+ 	vm_offset_t p = ml_io_map(HSPHY_PA, 0x1000);
+ 	if (!p) {
+ 		return;
+ 	}
+-	ud_hsphy_dump(p, "as ABL left it");
++	printf("SWEET USB: qusb2 as ABL left it: pwr_ctrl1 0x%x port_tune1 0x%x pll_status 0x%x\n",
++	    usb_rd(p, QP_PWR_CTRL1), usb_rd(p, QP_PORT_TUNE1), usb_rd(p, QP_PLL_STATUS));
+ 	if (!doinit) {
+ 		return;
+ 	}
+-	hp_rmw(p, HP_CFG0, 1u << 1, 1u << 1);           /* UTMI_PHY_CMN_CTRL_OVERRIDE_EN */
+-	hp_rmw(p, HP_UTMI_CTRL5, 1u << 1, 1u << 1);     /* POR */
+-	hp_rmw(p, HP_COMMON0, 7u << 4, 0);              /* FSEL */
+-	hp_rmw(p, HP_COMMON1, 1u << 5, 1u << 5);        /* PLLBTUNE */
+-	hp_rmw(p, HP_REFCLK, 3u, 2u);                   /* REFCLK_SEL default */
+-	hp_rmw(p, HP_COMMON1, 1u << 4, 1u << 4);        /* VBUSVLDEXTSEL0 */
+-	hp_rmw(p, HP_CTRL1, 1u << 0, 1u << 0);          /* VBUSVLDEXT0 */
+-	hp_rmw(p, HP_COMMON2, 1u << 0, 1u << 0);        /* VREGBYPASS */
+-	hp_rmw(p, HP_CTRL2, (1u << 3) | (1u << 2), (1u << 3) | (1u << 2));     /* SUSPEND_N(_SEL) */
+-	hp_rmw(p, HP_UTMI_CTRL0, 1u << 0, 1u << 0);     /* SLEEPM */
+-	hp_rmw(p, HP_COMMON0, 1u << 2, 0);              /* SIDDQ off: power up */
+-	delay(100);
+-	hp_rmw(p, HP_UTMI_CTRL5, 1u << 1, 0);           /* POR release */
+-	hp_rmw(p, HP_CTRL2, 1u << 3, 0);
+-	hp_rmw(p, HP_CFG0, 1u << 1, 0);
+-	hp_rmw(p, 0x70, 0xff, 0x43);                    /* DT qcom,param-override-seq: 0x43 @ X1 */
+-	delay(1000);
+-	ud_hsphy_dump(p, "after init");
++	for (unsigned i = 0; i < sizeof(qusb_seq) / sizeof(qusb_seq[0]); i++) {
++		*(volatile uint32_t *)(p + qusb_seq[i][1]) = qusb_seq[i][0];
++		__asm__ volatile ("dsb sy" ::: "memory");
++	}
++	delay(5000);
++	int ms = 0;
++	while (!(usb_rd(p, QP_PLL_STATUS) & QP_PLL_LOCKED) && ms < 100) {
++		delay(1000);
++		ms++;
++	}
++	printf("SWEET USB: qusb2 after init: pwr_ctrl1 0x%x port_tune1 0x%x pll_status 0x%x (%s after %d ms)\n",
++	    usb_rd(p, QP_PWR_CTRL1), usb_rd(p, QP_PORT_TUNE1), usb_rd(p, QP_PLL_STATUS),
++	    (usb_rd(p, QP_PLL_STATUS) & QP_PLL_LOCKED) ? "PLL locked" : "PLL NOT locked", ms);
+ }
+ 
+ static void
