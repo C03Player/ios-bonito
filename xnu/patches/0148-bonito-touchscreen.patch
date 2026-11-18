@@ -1,0 +1,686 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -700,7 +700,657 @@
+ 		thread_deallocate(thread);
+ 	}
+ }
+ 
++/*
++ * Bonito touchscreen, polled (boot-arg sweettouch=0 disables, sweettouchdelay=SECS before it starts (default 20),
++ * sweettouchpower=0 leaves the PM660 touch supply GPIOs alone, sweettouchlog=1 logs every report):
++ *   Synaptics DSX (RMI4 functions F01 + F12) at I2C address 0x20 on GENI serial engine 9 (i2c@a84000 = QUP wrapper 1
++ *   SE1, pins GPIO6/7 function qup9). From the stock bonito DTBO (synaptics_dsx@20): supplies = PM660 GPIO12 and GPIO13
++ *   (digital output high), reset = TLMM 99 (active low), interrupt = TLMM 125 (active low), bus switch = TLMM 135
++ *   (low = application processor), display coordinates 1080x2160. Protocol from drivers/input/touchscreen/
++ *   synaptics_dsx/synaptics_dsx_core.c (LineageOS android_kernel_google_msm-4.9). The GENI engine setup is the one the
++ *   Redmi port uses for the same engine address. If the boot chain left no I2C firmware on SE9 the driver logs what it
++ *   found and stops; no firmware or configuration is ever written to the touch IC.
++ */
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++
++#define BT_SE_PA        0x00a84000u
++#define BT_GCC_PA       0x00100000u
++#define BT_NORTH_PA     0x03900000u     /* TLMM 0x3400000 + NORTH 0x500000: GPIO 6, 7, 99, 125 */
++#define BT_WEST_PA      0x03500000u     /* TLMM + WEST 0x100000: GPIO 135 */
++#define BT_GCC_VOTE     0x5200cu
++#define BT_RCG          0x18148u        /* gcc_qupv3_wrap1_s1_clk_src */
++#define BT_PIN_SDA      6
++#define BT_PIN_SCL      7
++#define BT_PIN_RESET    99
++#define BT_PIN_IRQ      125
++#define BT_PIN_SWITCH   135
++#define BT_ADDR         0x20u
++#define BT_MAX          10u
++#define BT_PANEL_W      1080
++#define BT_PANEL_H      2160
++
++#define BT_SE_STATUS    0x040u
++#define BT_SE_MCLK      0x048u
++#define BT_SE_FW        0x068u
++#define BT_SE_CLK_SEL   0x07cu
++#define BT_SE_DMA       0x258u
++#define BT_SE_TX_LEN    0x26cu
++#define BT_SE_RX_LEN    0x270u
++#define BT_SE_SCL       0x278u
++#define BT_SE_CMD       0x600u
++#define BT_SE_CTRL      0x604u
++#define BT_SE_IRQ       0x610u
++#define BT_SE_IRQ_EN    0x614u
++#define BT_SE_IRQ_CLR   0x618u
++#define BT_SE_TX        0x700u
++#define BT_SE_RX        0x780u
++#define BT_SE_TX_COUNT  0x800u
++#define BT_SE_RX_COUNT  0x804u
++#define BT_SE_HW_TX     0xe24u
++#define BT_SE_HW_RX     0xe28u
++#define BT_SE_DONE      (1u << 0)
++#define BT_SE_NACK      (1u << 10)
++#define BT_SE_ERRORS    (0x0eu | (1u << 9) | (1u << 10) | (1u << 12) | (1u << 13) | (3u << 24) | (3u << 28))
++#define BT_SE_EVENTS    (BT_SE_DONE | BT_SE_ERRORS | (1u << 5) | (1u << 26) | (1u << 27) | (1u << 30))
++
++static struct {
++	vm_offset_t se, gcc, north, west;
++	bool dead;
++	int log;
++	uint32_t irq_status;
++	uint32_t active;
++	int x[BT_MAX], y[BT_MAX];
++	uint8_t f01_ctrl, f01_data, f12_query, f12_ctrl, f12_data;
++	unsigned f12_off1, f12_off15, f12_n;
++	bool f12_has15, configured;
++	unsigned max_x, max_y;
++	unsigned reports;
++} bt;
++static int bt_chan;
++
++static uint32_t
++bt_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++bt_wr(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile ("dsb osh" ::: "memory");
++}
++
++static void
++bt_wait(unsigned ms)
++{
++	int t = (int)(((uint64_t)ms * (uint64_t)hz + 999) / 1000);
++	(void)tsleep(&bt_chan, PZERO, "bttouch", t < 1 ? 1 : t);
++}
++
++static bool
++bt_wait_clear(vm_offset_t base, uint32_t off, uint32_t mask)
++{
++	for (unsigned i = 0; i < 5000; i++) {
++		if (!(bt_rd(base, off) & mask)) {
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++/* TLMM pin: [1:0] pull (0 none, 1 down, 2 keeper, 3 up), [5:2] function, [8:6] drive (mA/2 - 1), [9] output enable. */
++static void
++bt_gpio(vm_offset_t base, unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
++{
++	uint32_t off = pin * 0x1000u;
++	if (out) {
++		bt_wr(base, off + 4u, (bt_rd(base, off + 4u) & ~2u) | (high ? 2u : 0u));
++	}
++	uint32_t cfg = bt_rd(base, off) & ~0x3ffu;
++	cfg |= (mux << 2) | pull | (drive << 6) | (out ? 0x200u : 0u);
++	bt_wr(base, off, cfg);
++}
++
++static bool
++bt_pin(vm_offset_t base, unsigned pin)
++{
++	return bt_rd(base, pin * 0x1000u + 4u) & 1u;
++}
++
++/* Vote on only wrapper 1 and its engine 1 (engine 9 overall), preserving other clock users. */
++static bool
++bt_clocks(void)
++{
++	uint32_t mask = (0x0fu << 18) | (1u << 23);
++	bt_wr(bt.gcc, BT_GCC_VOTE, bt_rd(bt.gcc, BT_GCC_VOTE) | mask);
++	uint32_t dfs = bt_rd(bt.gcc, BT_RCG + 0x14u);
++	uint32_t cfg = bt_rd(bt.gcc, BT_RCG + 4u);
++	printf("SWEET BTOUCH: gcc vote=%#x rcg=%#x cfg=%#x dfs=%#x\n", bt_rd(bt.gcc, BT_GCC_VOTE),
++	    bt_rd(bt.gcc, BT_RCG), cfg, dfs);
++	if (dfs & 1u) {
++		cfg = bt_rd(bt.gcc, BT_RCG + 0x1cu);
++		if ((cfg & 0x371fu) != 1u) {
++			printf("SWEET BTOUCH: DFS level 0 = %#x is not XO/1; stopping\n", cfg);
++			return false;
++		}
++	} else {
++		cfg = (cfg & ~(0x371fu | (1u << 20))) | 1u;
++		bt_wr(bt.gcc, BT_RCG + 4u, cfg);
++		bt_wr(bt.gcc, BT_RCG, bt_rd(bt.gcc, BT_RCG) | 1u);
++		if (!bt_wait_clear(bt.gcc, BT_RCG, 1u)) {
++			printf("SWEET BTOUCH: RCG update timeout\n");
++			return false;
++		}
++	}
++	const uint32_t branches[] = { 0x18004, 0x18008, 0x1800c, 0x18010, 0x18144 };
++	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); i++) {
++		if (!bt_wait_clear(bt.gcc, branches[i], 1u << 31)) {
++			printf("SWEET BTOUCH: GCC branch %#x halted (%#x)\n", branches[i], bt_rd(bt.gcc, branches[i]));
++			return false;
++		}
++	}
++	return true;
++}
++
++static bool
++bt_se_init(void)
++{
++	uint32_t fw = bt_rd(bt.se, BT_SE_FW);
++	uint32_t tx = bt_rd(bt.se, BT_SE_HW_TX), rx = bt_rd(bt.se, BT_SE_HW_RX);
++	printf("SWEET BTOUCH: se9 fw=%#x proto=%u status=%#x fifo-off=%#x tx=%#x rx=%#x\n", fw, (fw >> 8) & 0xffu,
++	    bt_rd(bt.se, BT_SE_STATUS), bt_rd(bt.se, 0x64), tx, rx);
++	if (((fw >> 8) & 0xffu) != 3u || (bt_rd(bt.se, 0x64) & 1u) || ((tx >> 24) & 0x3fu) != 32u ||
++	    ((rx >> 24) & 0x3fu) != 32u || ((tx >> 16) & 0x3fu) < 2u || ((rx >> 16) & 0x3fu) < 2u) {
++		printf("SWEET BTOUCH: SE9 has no usable I2C firmware / 32-bit FIFOs (protocol 3 expected); stopping\n");
++		return false;
++	}
++	if (bt_rd(bt.se, BT_SE_STATUS) & 0x1001u) {
++		printf("SWEET BTOUCH: SE9 already busy; stopping\n");
++		return false;
++	}
++	bt_wr(bt.se, 0xe18, 0);
++	bt_wr(bt.se, 0xe1c, 0);
++	bt_wr(bt.se, 0x644, 0);
++	bt_wr(bt.se, BT_SE_IRQ_CLR, 0xffffffffu);
++	bt_wr(bt.se, 0x648, 0xffffffffu);
++	bt_wr(bt.se, BT_SE_DMA, 0);
++	bt_wr(bt.se, 0x28, bt_rd(bt.se, 0x28) | 0x7fu);
++	bt_wr(bt.se, 0xe30, bt_rd(bt.se, 0xe30) | 0x0fu);
++	bt_wr(bt.se, 0x24, 0x7f);
++	bt_wr(bt.se, 0x20, 1);
++	bt_wr(bt.se, BT_SE_CLK_SEL, 0);
++	bt_wr(bt.se, BT_SE_MCLK, (7u << 4) | 1u);
++	bt_wr(bt.se, BT_SE_SCL, (10u << 20) | (11u << 10) | 26u);       /* 100 kHz */
++	bt_wr(bt.se, 0x254, 0);
++	bt_wr(bt.se, 0x260, 0x0004380eu);
++	bt_wr(bt.se, 0x264, 0x000c3e0eu);
++	bt_wr(bt.se, 0x284, 0x0004380eu);
++	bt_wr(bt.se, 0x288, 0x000c3e0eu);
++	bt_wr(bt.se, 0x80c, 1);
++	bt_wr(bt.se, 0x810, 0);
++	bt_wr(bt.se, 0x814, ((rx >> 16) & 0x3fu) - 1u);
++	bt_wr(bt.se, BT_SE_IRQ_EN, BT_SE_EVENTS);
++	if ((bt_rd(bt.se, BT_SE_TX_COUNT) & 0xfffffffu) || (bt_rd(bt.se, BT_SE_RX_COUNT) & 0x1ffffffu)) {
++		printf("SWEET BTOUCH: inherited FIFO data; stopping\n");
++		return false;
++	}
++	return true;
++}
++
++static void
++bt_abort(void)
++{
++	bt_wr(bt.se, BT_SE_CTRL, 2);
++	bool done = false;
++	for (unsigned i = 0; i < 5000; i++) {
++		if (bt_rd(bt.se, BT_SE_IRQ) & (1u << 5)) {
++			done = true;
++			break;
++		}
++		delay(1);
++	}
++	if (!done || !bt_wait_clear(bt.se, BT_SE_STATUS, 1u)) {
++		bt.dead = true;
++		printf("SWEET BTOUCH: abort failed status=%#x irq=%#x; stopping\n", bt_rd(bt.se, BT_SE_STATUS),
++		    bt_rd(bt.se, BT_SE_IRQ));
++	}
++	for (unsigned i = 0; i < 64 && (bt_rd(bt.se, BT_SE_RX_COUNT) & 0x1ffffffu); i++) {
++		(void)bt_rd(bt.se, BT_SE_RX);
++	}
++	bt_wr(bt.se, BT_SE_IRQ_CLR, 0xffffffffu);
++}
++
++/* One FIFO message: write of at most 3 bytes, or read of at most 90. */
++static int
++bt_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx, unsigned nr, bool stretch)
++{
++	if (bt.dead || nt > 3 || nr > 90 || (nt && nr) || (!nt && !nr)) {
++		return EIO;
++	}
++	if (!bt_wait_clear(bt.se, BT_SE_STATUS, 1u)) {
++		bt.dead = true;
++		return EBUSY;
++	}
++	bt_wr(bt.se, BT_SE_IRQ_CLR, 0xffffffffu);
++	bt_wr(bt.se, nr ? BT_SE_RX_LEN : BT_SE_TX_LEN, nr ? nr : nt);
++	bt_wr(bt.se, BT_SE_CMD, ((nr ? 2u : 1u) << 27) | ((uint32_t)addr << 9) | (stretch ? 4u : 0u));
++	unsigned sent = 0, got = 0;
++	int err = ETIMEDOUT;
++	for (unsigned i = 0; i < 20000; i++) {
++		uint32_t irq = bt_rd(bt.se, BT_SE_IRQ);
++		bt.irq_status = irq;
++		if (irq & BT_SE_ERRORS) {
++			err = (irq & BT_SE_NACK) ? ENXIO : EIO;
++			for (unsigned j = 0; j < 5000 && !(irq & BT_SE_DONE); j++) {
++				delay(1);
++				irq = bt_rd(bt.se, BT_SE_IRQ);
++			}
++			if ((irq & BT_SE_DONE) && !(bt_rd(bt.se, BT_SE_STATUS) & 1u) &&
++			    !(bt_rd(bt.se, BT_SE_TX_COUNT) & 0xfffffffu) && !(bt_rd(bt.se, BT_SE_RX_COUNT) & 0x1ffffffu)) {
++				bt_wr(bt.se, BT_SE_IRQ_CLR, irq);
++				return err;
++			}
++			break;
++		}
++		if (nt && !sent && (irq & (1u << 30))) {
++			uint32_t word = 0;
++			for (unsigned j = 0; j < nt; j++) {
++				word |= (uint32_t)tx[j] << (8u * j);
++			}
++			bt_wr(bt.se, BT_SE_TX, word);
++			sent = nt;
++		}
++		uint32_t count = bt_rd(bt.se, BT_SE_RX_COUNT) & 0x1ffffffu;
++		if (count > 64) {
++			err = EIO;
++			break;
++		}
++		while (count--) {
++			uint32_t word = bt_rd(bt.se, BT_SE_RX);
++			for (unsigned j = 0; j < 4 && got < nr; j++) {
++				rx[got++] = (uint8_t)(word >> (8u * j));
++			}
++		}
++		if (irq & BT_SE_DONE) {
++			bt_wr(bt.se, BT_SE_IRQ_CLR, irq);
++			if (got == nr && sent == nt) {
++				return 0;
++			}
++			err = EIO;
++			break;
++		}
++		bt_wr(bt.se, BT_SE_IRQ_CLR, irq & ((1u << 26) | (1u << 27) | (1u << 30)));
++		delay(1);
++	}
++	bt_abort();
++	return err;
++}
++
++/* RMI4 register access: pointer write held with a clock stretch, then a repeated-start read. */
++static int
++bt_rmi_read(uint8_t reg, uint8_t *buf, unsigned len)
++{
++	int err = bt_msg(BT_ADDR, &reg, 1, NULL, 0, true);
++	if (err) {
++		return err;
++	}
++	return bt_msg(BT_ADDR, NULL, 0, buf, len, false);
++}
++
++static int
++bt_rmi_write(uint8_t reg, uint8_t val)
++{
++	uint8_t tx[2] = { reg, val };
++	return bt_msg(BT_ADDR, tx, 2, NULL, 0, false);
++}
++
++/* PM660 / PM660L SPMI GPIO, reusing the observer-channel reader of the button code above. */
++static bool
++bt_spmi_map(void)
++{
++	if (!bk_core) {
++		bk_core = ml_io_map(BK_CORE_PA, 0x2000);
++		bk_cnfg = ml_io_map(BK_CNFG_PA, 0x1000);
++		bk_obs = ml_io_map(BK_OBS_PA, 0x10000);
++	}
++	return bk_core && bk_cnfg && bk_obs;
++}
++
++static bool
++bt_spmi_write(vm_offset_t ch, uint32_t addr, uint8_t val)
++{
++	bt_wr(ch, 0x10, val);
++	bt_wr(ch, 0x00, (0u << 27) | ((addr & 0xffu) << 4));
++	for (unsigned i = 0; i < 1000; i++) {
++		uint32_t st = bt_rd(ch, 0x08);
++		if (st & 1u) {
++			return !(st & 0x0eu);
++		}
++		delay(1);
++	}
++	return false;
++}
++
++/* Make PM660 (SID 0) GPIO n a high digital output, exactly as pinctrl-spmi-gpio.c does for "output-high". */
++static void
++bt_pmic_supply(unsigned n)
++{
++	uint32_t ppid = 0x0c0u + (n - 1u);
++	uint32_t apid = bk_find_apid(ppid, bk_rd(bk_core, 4) & 0x7ffu);
++	uint32_t base = (ppid & 0xffu) << 8;
++	uint8_t sub = 0, mode = 0, out = 0, en = 0, vin = 0;
++	if (apid == BK_NO_APID || !bk_read(apid, base | 0x05, &sub) || !bk_read(apid, base | 0x40, &mode) ||
++	    !bk_read(apid, base | 0x44, &out) || !bk_read(apid, base | 0x46, &en)) {
++		printf("SWEET BTOUCH: PM660 GPIO%u unreadable (apid %#x)\n", n, apid);
++		return;
++	}
++	(void)bk_read(apid, base | 0x41, &vin);
++	uint32_t owner = bk_rd(bk_cnfg, 0x700u + 4u * apid) & 7u;
++	printf("SWEET BTOUCH: PM660 GPIO%u apid %u owner %u subtype %#x mode %#x out-src %#x en %#x vin %#x\n", n, apid,
++	    owner, sub, mode, out, en, vin);
++	if (sub < 0x10u || sub > 0x13u) {
++		printf("SWEET BTOUCH: PM660 GPIO%u is not an LV/MV pad; leaving it alone\n", n);
++		return;
++	}
++	if ((en & 0x80u) && (mode & 3u) && (out & 0x80u)) {
++		printf("SWEET BTOUCH: PM660 GPIO%u already a high output\n", n);
++		return;
++	}
++	if (owner != 0) {
++		printf("SWEET BTOUCH: PM660 GPIO%u not owned by the application processor; cannot enable\n", n);
++		return;
++	}
++	vm_offset_t ch = ml_io_map(0x0c600000u + 0x10000u * apid, 0x10000);
++	if (!ch) {
++		printf("SWEET BTOUCH: PM660 GPIO%u write channel mapping failed\n", n);
++		return;
++	}
++	bool ok = bt_spmi_write(ch, 0x41, 0x00) &&      /* power source 0 */
++	    bt_spmi_write(ch, 0x42, 0x04) &&            /* no pull */
++	    bt_spmi_write(ch, 0x45, 0x02) &&            /* CMOS, drive strength 2 */
++	    bt_spmi_write(ch, 0x40, 0x01) &&            /* digital output */
++	    bt_spmi_write(ch, 0x44, 0x80) &&            /* output value 1 */
++	    bt_spmi_write(ch, 0x46, 0x80);              /* enable */
++	(void)bk_read(apid, base | 0x40, &mode);
++	(void)bk_read(apid, base | 0x44, &out);
++	(void)bk_read(apid, base | 0x46, &en);
++	printf("SWEET BTOUCH: PM660 GPIO%u write %s, now mode %#x out-src %#x en %#x\n", n, ok ? "ok" : "FAILED", mode,
++	    out, en);
++}
++
++static void
++bt_report(uint32_t mask, const int *x, const int *y)
++{
++	for (unsigned id = 0; id < BT_MAX; id++) {
++		uint32_t bit = 1u << id;
++		if (mask & bit) {
++			if (!(bt.active & bit) || x[id] != bt.x[id] || y[id] != bt.y[id]) {
++				if (bt.log || bt.reports < 40) {
++					printf("SWEET BTOUCH: finger %u down at %d,%d\n", id, x[id], y[id]);
++					bt.reports++;
++				}
++				sweet_hid_touch((int)id, 1, x[id], y[id]);
++			}
++			bt.x[id] = x[id];
++			bt.y[id] = y[id];
++		} else if (bt.active & bit) {
++			if (bt.log || bt.reports < 40) {
++				printf("SWEET BTOUCH: finger %u up\n", id);
++				bt.reports++;
++			}
++			sweet_hid_touch((int)id, 0, bt.x[id], bt.y[id]);
++		}
++	}
++	bt.active = mask;
++}
++
++/* One poll: acknowledge F01, then read the F12 finger records. */
++static int
++bt_poll(void)
++{
++	uint8_t st[2], d15[2] = { 0, 0 }, buf[BT_MAX * 8u];
++	int x[BT_MAX] = { 0 }, y[BT_MAX] = { 0 };
++	uint32_t mask = 0;
++	unsigned n = bt.f12_n;
++
++	int err = bt_rmi_read(bt.f01_data, st, 2);
++	if (err) {
++		return err;
++	}
++	if (!bt.configured && ((st[0] & 0x80u) || (st[0] & 0x0fu) == 1u)) {
++		bt.configured = true;
++		/* Unconfigured after a reset: tell the IC the host configured it (a normal driver does this too). */
++		uint8_t c = 0;
++		if (!bt_rmi_read(bt.f01_ctrl, &c, 1)) {
++			(void)bt_rmi_write(bt.f01_ctrl, (uint8_t)((c & ~3u) | 0x80u));
++		}
++		printf("SWEET BTOUCH: device status %#x irq %#x: set configured\n", st[0], st[1]);
++	}
++	if (bt.f12_has15) {
++		unsigned nb = (bt.f12_n + 7u) / 8u;
++		err = bt_rmi_read((uint8_t)(bt.f12_data + bt.f12_off15), d15, nb);
++		if (err) {
++			return err;
++		}
++		unsigned top = 0;
++		for (unsigned i = 0; i < bt.f12_n; i++) {
++			if (d15[i / 8u] & (1u << (i % 8u))) {
++				top = i + 1u;
++			}
++		}
++		n = top;
++	}
++	if (n) {
++		err = bt_rmi_read((uint8_t)(bt.f12_data + bt.f12_off1), buf, n * 8u);
++		if (err) {
++			return err;
++		}
++	}
++	for (unsigned i = 0; i < n; i++) {
++		const uint8_t *p = buf + 8u * i;
++		if (p[0] != 1u && p[0] != 6u) {         /* finger / gloved finger only */
++			continue;
++		}
++		unsigned px = p[1] | ((unsigned)p[2] << 8), py = p[3] | ((unsigned)p[4] << 8);
++		if (bt.max_x && bt.max_y && (bt.max_x + 1u != BT_PANEL_W || bt.max_y + 1u != BT_PANEL_H)) {
++			px = px * BT_PANEL_W / (bt.max_x + 1u);
++			py = py * BT_PANEL_H / (bt.max_y + 1u);
++		}
++		x[i] = px > BT_PANEL_W - 1 ? BT_PANEL_W - 1 : (int)px;
++		y[i] = py > BT_PANEL_H - 1 ? BT_PANEL_H - 1 : (int)py;
++		mask |= 1u << i;
++	}
++	bt_report(mask, x, y);
++	return 0;
++}
++
++static unsigned
++bt_count(const uint8_t *bits, unsigned first, unsigned last)
++{
++	unsigned c = 0;
++	for (unsigned k = first; k < last; k++) {
++		c += (bits[1 + k / 8u] >> (k % 8u)) & 1u;
++	}
++	return c;
++}
++
++/* RMI4: function descriptor table on page 0, then F01 and F12 geometry. */
++static bool
++bt_rmi_init(void)
++{
++	int err = bt_rmi_write(0xff, 0);
++	if (err) {
++		printf("SWEET BTOUCH: no ACK from %#x (err %d, irq-status %#x); scanning the bus\n", BT_ADDR, err,
++		    bt.irq_status);
++		for (unsigned a = 0x08; a < 0x78 && !bt.dead; a++) {
++			uint8_t b;
++			if (bt_msg((uint8_t)a, NULL, 0, &b, 1, false) == 0) {
++				printf("SWEET BTOUCH: device answers at %#x\n", a);
++			}
++		}
++		return false;
++	}
++	bool f01 = false, f12 = false;
++	uint8_t f12q = 0, f12c = 0, f12d = 0;
++	for (unsigned pdt = 0xe9; pdt >= 0xd0 && !bt.dead; pdt -= 6) {
++		uint8_t d[6];
++		if (bt_rmi_read((uint8_t)pdt, d, 6)) {
++			break;
++		}
++		if (d[5] == 0 || d[5] == 0xff) {
++			break;
++		}
++		printf("SWEET BTOUCH: F%02x at pdt %#x: query %#x cmd %#x ctrl %#x data %#x intr %#x\n", d[5], pdt, d[0],
++		    d[1], d[2], d[3], d[4]);
++		if (d[5] == 0x01) {
++			f01 = true;
++			bt.f01_ctrl = d[2];
++			bt.f01_data = d[3];
++		} else if (d[5] == 0x12) {
++			f12 = true;
++			f12q = d[0];
++			f12c = d[2];
++			f12d = d[3];
++		}
++	}
++	if (!f01 || !f12) {
++		printf("SWEET BTOUCH: need F01 and F12 on page 0 (f01=%d f12=%d); stopping\n", f01, f12);
++		return false;
++	}
++	uint8_t s5 = 0, s8 = 0, q5[8] = { 0 }, q8[8] = { 0 };
++	if (bt_rmi_read((uint8_t)(f12q + 4), &s5, 1) || bt_rmi_read((uint8_t)(f12q + 7), &s8, 1)) {
++		return false;
++	}
++	if (s5 > sizeof(q5)) {
++		s5 = sizeof(q5);
++	}
++	if (s8 > sizeof(q8)) {
++		s8 = sizeof(q8);
++	}
++	if (bt_rmi_read((uint8_t)(f12q + 5), q5, s5) || bt_rmi_read((uint8_t)(f12q + 8), q8, s8)) {
++		return false;
++	}
++	printf("SWEET BTOUCH: F12 query5 (%u) %02x %02x %02x %02x %02x, query8 (%u) %02x %02x %02x %02x\n", s5, q5[0],
++	    q5[1], q5[2], q5[3], q5[4], s8, q8[0], q8[1], q8[2], q8[3]);
++	unsigned c8 = bt_count(q5, 0, 8), c23 = bt_count(q5, 0, 23);
++	uint8_t c23d[2] = { 0 }, c8d[4] = { 0 };
++	bt.f12_data = f12d;
++	bt.f12_off1 = bt_count(q8, 0, 1);
++	bt.f12_has15 = s8 >= 3 && ((q8[2] >> 7) & 1u);
++	bt.f12_off15 = bt_count(q8, 0, 15);
++	if (bt_rmi_read((uint8_t)(f12c + c23), c23d, 2)) {
++		return false;
++	}
++	if (!bt_rmi_read((uint8_t)(f12c + c8), c8d, 4)) {
++		bt.max_x = c8d[0] | ((unsigned)c8d[1] << 8);
++		bt.max_y = c8d[2] | ((unsigned)c8d[3] << 8);
++	}
++	bt.f12_n = c23d[1] < BT_MAX ? c23d[1] : BT_MAX;
++	printf("SWEET BTOUCH: F12 ctrl23 %02x %02x -> %u fingers, data1 at +%u, data15 %s at +%u, sensor max %u x %u\n",
++	    c23d[0], c23d[1], bt.f12_n, bt.f12_off1, bt.f12_has15 ? "present" : "absent", bt.f12_off15, bt.max_x,
++	    bt.max_y);
++	if (!bt.f12_n) {
++		return false;
++	}
++	uint8_t st[2] = { 0 }, c = 0;
++	(void)bt_rmi_read(bt.f01_data, st, 2);
++	(void)bt_rmi_read(bt.f01_ctrl, &c, 1);
++	printf("SWEET BTOUCH: F01 status %#x irq %#x ctrl0 %#x\n", st[0], st[1], c);
++	return true;
++}
++
++static void
++bt_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	int delay_s = 20, power = 1;
++	unsigned errors = 0, ticks = 0;
++
++	PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
++	PE_parse_boot_argn("sweettouchpower", &power, sizeof(power));
++	PE_parse_boot_argn("sweettouchlog", &bt.log, sizeof(bt.log));
++	printf("SWEET BTOUCH: starting in %d s\n", delay_s);
++	bt_wait((unsigned)delay_s * 1000u);
++	bt.gcc = ml_io_map(BT_GCC_PA, 0x60000);
++	bt.north = ml_io_map(BT_NORTH_PA, 0x7e000);
++	bt.west = ml_io_map(BT_WEST_PA, 0x88000);
++	bt.se = ml_io_map(BT_SE_PA, 0x4000);
++	if (!bt.gcc || !bt.north || !bt.west || !bt.se || !bt_spmi_map()) {
++		printf("SWEET BTOUCH: MMIO mapping failed\n");
++		goto out;
++	}
++	printf("SWEET BTOUCH: pins before: sda/scl %#x/%#x reset %#x irq %#x switch %#x\n",
++	    bt_rd(bt.north, BT_PIN_SDA * 0x1000u), bt_rd(bt.north, BT_PIN_SCL * 0x1000u),
++	    bt_rd(bt.north, BT_PIN_RESET * 0x1000u), bt_rd(bt.north, BT_PIN_IRQ * 0x1000u),
++	    bt_rd(bt.west, BT_PIN_SWITCH * 0x1000u));
++	if (!bt_clocks() || !bt_se_init()) {
++		goto out;
++	}
++	bt_gpio(bt.west, BT_PIN_SWITCH, 0, 0, 0, true, false);  /* application processor owns the touch bus */
++	bt_gpio(bt.north, BT_PIN_SDA, 1, 0, 0, false, false);   /* qup9, 2 mA, no pull */
++	bt_gpio(bt.north, BT_PIN_SCL, 1, 0, 0, false, false);
++	bt_gpio(bt.north, BT_PIN_IRQ, 0, 0, 0, false, false);   /* interrupt input, no pull */
++	bt_gpio(bt.north, BT_PIN_RESET, 0, 0, 0, true, true);   /* reset released */
++	if (power) {
++		bt_pmic_supply(12);
++		bt_pmic_supply(13);
++	}
++	bt_wait(50);
++	bt_gpio(bt.north, BT_PIN_RESET, 0, 0, 0, true, false);  /* reset pulse (active low) */
++	bt_wait(5);
++	bt_gpio(bt.north, BT_PIN_RESET, 0, 0, 0, true, true);
++	bt_wait(300);
++	printf("SWEET BTOUCH: after reset: irq pin %d reset pin %d\n", bt_pin(bt.north, BT_PIN_IRQ),
++	    bt_pin(bt.north, BT_PIN_RESET));
++	if (!bt_rmi_init()) {
++		printf("SWEET BTOUCH: touch IC not usable (dead=%d); stopping\n", bt.dead);
++		goto out;
++	}
++	printf("SWEET BTOUCH: running, %dx%d, polled\n", BT_PANEL_W, BT_PANEL_H);
++	while (!bt.dead) {
++		if (bt.active || !bt_pin(bt.north, BT_PIN_IRQ) || (++ticks % 25u) == 0) {
++			int err = bt_poll();
++			if (err) {
++				if ((errors++ % 100u) == 0) {
++					printf("SWEET BTOUCH: poll err=%d irq=%#x\n", err, bt.irq_status);
++				}
++				if (errors == 10) {
++					bt_report(0, bt.x, bt.y);
++				}
++			} else {
++				errors = 0;
++			}
++		}
++		bt_wait(8);
++	}
++	bt_report(0, bt.x, bt.y);
++out:
++	for (;;) {
++		bt_wait(60000);
++	}
++}
++
++void sweet_btouch_start(void);
++void
++sweet_btouch_start(void)
++{
++	int enabled = 1;
++	thread_t thread;
++
++	PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
++	if (!enabled) {
++		return;
++	}
++	if (kernel_thread_start(bt_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++
+ /* Root device for rd=ufsroot0 (IOFindBSDRoot). */
+ int sweet_ufs_rootdev(dev_t *dev);
+ 
+@@ -950,6 +950,10 @@
+ 		extern void sweet_bkeys_start(void);
+ 		sweet_bkeys_start();    /* power / volume buttons over SPMI (boot-arg sweetbkeys=0 disables): bsd/dev/sweet_ufs.c */
+ 	}
++	{
++		extern void sweet_btouch_start(void);
++		sweet_btouch_start();   /* touchscreen: Synaptics over GENI I2C (boot-arg sweettouch=0 disables): bsd/dev/sweet_ufs.c */
++	}
+ 	sweet_usb_probe();      /* boot-arg sweetusb=2 (+ sweetusbdma=<low PA>) starts the USB Ethernet gadget: bsd/dev/sweet_usb.c */
+ 	{
+ 		/* sweetusbhold=N: keep the console quiet for N seconds so the USB messages stay on screen (debug) */
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -356,9 +356,9 @@
+  * app-switcher gesture.
+  */
+ #define SWEET_TOUCH_EDGE_PX 48
+ /* Touch reports panel pixels; flame's panel is 1080x2280 (SWEET.h). */
+ #define SWEET_PANEL_W 1080
+-#define SWEET_PANEL_H 2280
++#define SWEET_PANEL_H 2160
+ class SweetHIDTouch : public IOHIDEventService {
+ 	OSDeclareDefaultStructors(SweetHIDTouch);
+ public:
