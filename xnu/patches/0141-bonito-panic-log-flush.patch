@@ -1,0 +1,69 @@
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1300,7 +1300,14 @@
+ 		 * TODO: Need to clear panic log when return from debugger
+ 		 * hooked up for embedded
+ 		 */
+ 		SavePanicInfo(debugger_message, debugger_panic_data, debugger_panic_options);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		{
++			/* The panic text and backtrace are on the console (and in the log ring) now: get them to the eMMC before the hang. */
++			extern void sweet_log_panic_flush(void);
++			sweet_log_panic_flush();
++		}
++#endif
+ 
+ #if DEVELOPMENT || DEBUG
+ 		INJECT_NESTED_PANIC_IF_REQUESTED(PANIC_TEST_CASE_RECURPANIC_POSTLOG);
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -700,6 +700,47 @@
+ 	}
+ }
+ 
++/*
++ * Called from the panic path (osfmk/kern/debug.c, after SavePanicInfo) once the panic text and backtrace are on the
++ * console and therefore in the log ring: write the last 256 KiB of the ring and the header to the eMMC right away.
++ * The flush thread cannot run any more (the panic stops the other CPUs); the driver is polled, so this works in panic
++ * context. Skipped if another CPU was in the middle of an eMMC command (the lock is taken). The header's flush
++ * sequence is set to 0x50414e49 ("PANI") so the reader can tell.
++ */
++void sweet_log_panic_flush(void);
++void
++sweet_log_panic_flush(void)
++{
++	if (!su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS || !lck_mtx_try_lock(&sweet_ufs_lock)) {
++		return;
++	}
++	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
++	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
++	uint64_t pos = total - MIN(total, (uint64_t)(256u << 10));
++	void *bounce = (void *)(su.dma + DMA_BOUNCE);
++	int error = 0;
++
++	while (pos < total && !error) {
++		uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
++		uint32_t blk = off / UFS_BLOCK;
++		uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
++		uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk)),
++		    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
++		memcpy(bounce, sweet_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
++		error = ufs_write_blocks(base + 1 + blk, n);
++		pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
++	}
++	if (!error) {
++		struct sweet_log_header h = {
++			.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
++			.version = 1, .size = SWEET_LOG_SIZE, .total = total, .seq = 0x50414e49,
++		};
++		bzero(bounce, UFS_BLOCK);
++		memcpy(bounce, &h, sizeof(h));
++		(void)ufs_write_blocks(base, 1);
++	}
++}
++
+ /* Root device for rd=ufsroot0 (IOFindBSDRoot). */
+ int sweet_ufs_rootdev(dev_t *dev);
+ 
