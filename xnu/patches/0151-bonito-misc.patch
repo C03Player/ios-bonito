@@ -12,7 +12,7 @@ diff --git a/bsd/dev/bonito_misc.c b/bsd/dev/bonito_misc.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/bonito_misc.c
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,228 @@
 +/*
 + * bonito small system features (each controlled by a boot-arg):
 + *
@@ -38,6 +38,8 @@ new file mode 100644
 +#include <machine/machine_routines.h>
 +#include <mach/mach_time.h>
 +#include <pexpert/pexpert.h>
++#include <vm/vm_kern.h>
++#include <libkern/libkern.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +extern int hz;
@@ -128,6 +130,52 @@ new file mode 100644
 +	}
 +}
 +
++/* Memory bandwidth: copy, write and read 16 MiB buffers (larger than any cache) several times. */
++static void
++bench_mem(void)
++{
++	vm_offset_t a = 0, b = 0;
++	const size_t sz = 16u << 20;
++	const unsigned reps = 8;
++	uint64_t t0, t1, ns, sum = 0;
++	volatile uint64_t sink;
++
++	if (kmem_alloc(kernel_map, &a, sz, KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
++	    kmem_alloc(kernel_map, &b, sz, KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET MEMBENCH: allocation failed\n");
++		return;
++	}
++	memset((void *)a, 0x5a, sz);
++	t0 = mach_absolute_time();
++	for (unsigned i = 0; i < reps; i++) {
++		memcpy((void *)b, (void *)a, sz);
++	}
++	t1 = mach_absolute_time();
++	absolutetime_to_nanoseconds(t1 - t0, &ns);
++	printf("SWEET MEMBENCH: memcpy %llu MB/s (reads and writes counted once each)\n", (unsigned long long)(sz / 1000000ull * reps * 1000000000ull / ns));
++	t0 = mach_absolute_time();
++	for (unsigned i = 0; i < reps; i++) {
++		memset((void *)b, (int)i, sz);
++	}
++	t1 = mach_absolute_time();
++	absolutetime_to_nanoseconds(t1 - t0, &ns);
++	printf("SWEET MEMBENCH: memset %llu MB/s\n", (unsigned long long)(sz / 1000000ull * reps * 1000000000ull / ns));
++	t0 = mach_absolute_time();
++	for (unsigned i = 0; i < reps; i++) {
++		const uint64_t *p = (const uint64_t *)a;
++		for (size_t k = 0; k < sz / 8; k += 8) {
++			sum += p[k] + p[k + 1] + p[k + 2] + p[k + 3] + p[k + 4] + p[k + 5] + p[k + 6] + p[k + 7];
++		}
++	}
++	t1 = mach_absolute_time();
++	absolutetime_to_nanoseconds(t1 - t0, &ns);
++	sink = sum;
++	(void)sink;
++	printf("SWEET MEMBENCH: read %llu MB/s\n", (unsigned long long)(sz / 1000000ull * reps * 1000000000ull / ns));
++	kmem_free(kernel_map, a, sz);
++	kmem_free(kernel_map, b, sz);
++}
++
 +static int bench_chan;
 +static volatile int bench_done;
 +
@@ -140,6 +188,9 @@ new file mode 100644
 +
 +	(void)tsleep(&bench_chan, PZERO, "benchwait", hz * 2 + (int)id);   /* staggered so the threads do not all start at once */
 +	cpu = cpu_number();
++	if (id == 0) {
++		bench_mem();
++	}
 +	t0 = mach_absolute_time();
 +	__asm__ volatile (
 +		"1:\n\t"
