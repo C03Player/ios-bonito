@@ -1,0 +1,164 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -145,6 +145,7 @@
+ 	void present(const uint8_t *rec);
+ 	bool presentGPU(const uint8_t *rec);
+ 	void copyRow(uint32_t x, uint32_t y, const uint32_t *src, uint32_t n);
++	bool presentFit(const uint8_t *rec);
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+@@ -520,6 +520,142 @@
+ 	return true;
+ }
+ 
++/* Bilinear blend of two BGRA pixels, w = 0..255 the weight of b; two channels per multiply. */
++static inline uint32_t
++sweet_lerp32(uint32_t a, uint32_t b, uint32_t w)
++{
++	uint32_t iw = 256 - w;
++	uint32_t rb = (((a & 0x00ff00ffu) * iw + (b & 0x00ff00ffu) * w) >> 8) & 0x00ff00ffu;
++	uint32_t ag = (((a >> 8) & 0x00ff00ffu) * iw + ((b >> 8) & 0x00ff00ffu) * w) & 0xff00ff00u;
++	return rb | ag;
++}
++
++/*
++ * CPU "fit" present (boot-arg sweetfb_fit=0 goes back to cropping the centre): iOS draws the presented display
++ * (fLogicalW x fLogicalH, 1170x2532) and the panel is smaller and wider (1080x2160), so the whole frame is scaled by the
++ * largest factor that fits (bilinear, 16.16 fixed point) and centred; the bars at the sides stay black (the panel is
++ * cleared once). The fitted rectangle is published in sweet_display_fit_* for the touch mapping. False: not applicable,
++ * use the crop copy.
++ */
++bool
++AppleCLCD::presentFit(const uint8_t *rec)
++{
++	static int state;               /* 0 not read, 1 off, 2 on */
++	static bool cleared;
++	static uint32_t xi[1280], xw[1280], rowbuf[1280];
++
++	if (state == 0) {
++		int fit = 1;
++		PE_parse_boot_argn("sweetfb_fit", &fit, sizeof(fit));
++		state = fit ? 2 : 1;
++	}
++	if (state != 2 || (fLogicalW == fWidth && fLogicalH == fHeight) || fWidth > 1280) {
++		return false;
++	}
++	uint32_t mask = get32(rec, 0x104);
++	uint64_t scw = ((uint64_t)fWidth << 16) / fLogicalW, sch = ((uint64_t)fHeight << 16) / fLogicalH;
++	uint64_t sc = scw < sch ? scw : sch;
++	uint32_t fitW = (uint32_t)(((uint64_t)fLogicalW * sc) >> 16), fitH = (uint32_t)(((uint64_t)fLogicalH * sc) >> 16);
++	int32_t fitX = (int32_t)(fWidth - fitW) / 2, fitY = (int32_t)(fHeight - fitH) / 2;
++	uint64_t inv = (1ull << 32) / sc;       /* 1 / scale, 16.16 */
++
++	if (!cleared) {
++		cleared = true;
++		bzero((void *)fPixels, (size_t)fRowBytes * fHeight);
++	}
++	sweet_display_fit_x = fitX;
++	sweet_display_fit_y = fitY;
++	sweet_display_fit_w = (int)fitW;
++	sweet_display_fit_h = (int)fitH;
++
++	for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
++		uint32_t id = get32(rec, 0x54 + 4 * layer);
++		const uint8_t *a = rec + 0x64 + 16 * layer;
++		const uint8_t *b = rec + 0xc4 + 16 * layer;
++		int32_t sx = (int32_t)get32(a, 0), sy = (int32_t)get32(a, 4);
++		int32_t dx = (int32_t)get32(b, 0), dy = (int32_t)get32(b, 4);
++		int32_t w = (int32_t)get32(b, 8), h = (int32_t)get32(b, 12);
++
++		if (!(mask & (1u << layer)) || id == 0) {
++			continue;
++		}
++		SweetSurface *s = sweet_surface_copy(id);
++		if (s == NULL || s == fSurface) {
++			OSSafeReleaseNULL(s);
++			continue;
++		}
++		uintptr_t src = s->kernelAddress();
++		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
++		if (w <= 0 || h <= 0) {
++			w = (int32_t)s->width;
++			h = (int32_t)s->height;
++		}
++		if (sx < 0 || sy < 0) {
++			sx = sy = 0;
++		}
++		if (dx < 0 || dy < 0) {
++			dx = dy = 0;
++		}
++		if (w > (int32_t)s->width - sx) {
++			w = (int32_t)s->width - sx;
++		}
++		if (h > (int32_t)s->height - sy) {
++			h = (int32_t)s->height - sy;
++		}
++		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow + (uint64_t)(sx + w) * 4;
++		if (src == 0 || bpe != 4 || w < 2 || h < 2 || s->elementWidth != 1 || s->elementHeight != 1 ||
++		    s->memory == NULL || last > s->memory->getLength()) {
++			s->release();
++			continue;
++		}
++		int32_t ox0 = fitX + (int32_t)(((uint64_t)dx * sc) >> 16), oy0 = fitY + (int32_t)(((uint64_t)dy * sc) >> 16);
++		int32_t ow = (int32_t)(((uint64_t)w * sc) >> 16), oh = (int32_t)(((uint64_t)h * sc) >> 16);
++		if (ox0 + ow > (int32_t)fWidth) {
++			ow = (int32_t)fWidth - ox0;
++		}
++		if (oy0 + oh > (int32_t)fHeight) {
++			oh = (int32_t)fHeight - oy0;
++		}
++		if (ow <= 0 || oh <= 0 || ow > 1280) {
++			s->release();
++			continue;
++		}
++		for (int32_t x = 0; x < ow; x++) {
++			int64_t u = (int64_t)((uint64_t)x * inv + (inv >> 1)) - 0x8000;
++			if (u < 0) {
++				u = 0;
++			}
++			uint32_t ix = (uint32_t)(u >> 16), wx = (uint32_t)(u >> 8) & 0xff;
++			if (ix >= (uint32_t)w - 1) {
++				ix = (uint32_t)w - 2;
++				wx = 255;
++			}
++			xi[x] = (uint32_t)sx + ix;
++			xw[x] = wx;
++		}
++		for (int32_t y = 0; y < oh; y++) {
++			int64_t v = (int64_t)((uint64_t)y * inv + (inv >> 1)) - 0x8000;
++			if (v < 0) {
++				v = 0;
++			}
++			uint32_t iy = (uint32_t)(v >> 16), wy = (uint32_t)(v >> 8) & 0xff;
++			if (iy >= (uint32_t)h - 1) {
++				iy = (uint32_t)h - 2;
++				wy = 255;
++			}
++			const uint32_t *p0 = (const uint32_t *)(src + s->offset + (uint64_t)((uint32_t)sy + iy) * s->bytesPerRow);
++			const uint32_t *p1 = (const uint32_t *)((uintptr_t)p0 + s->bytesPerRow);
++			for (int32_t x = 0; x < ow; x++) {
++				uint32_t i = xi[x], wx = xw[x];
++				rowbuf[x] = sweet_lerp32(sweet_lerp32(p0[i], p0[i + 1], wx), sweet_lerp32(p1[i], p1[i + 1], wx), wy);
++			}
++			copyRow((uint32_t)ox0, (uint32_t)(oy0 + y), rowbuf, (uint32_t)ow);
++		}
++		s->release();
++	}
++	return true;
++}
++
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+@@ -700,6 +700,9 @@
+ 	if (sweet_gpu_ready() && presentGPU(rec)) {
+ 		return;
+ 	}
++	if (presentFit(rec)) {
++		return;
++	}
+ 	if (sweet_display_fit_w) {
+ 		sweet_display_fit_w = 0;        /* touch back to the crop mapping */
+ 		sweet_display_fit_x = sweet_display_fit_y = sweet_display_fit_h = 0;
