@@ -1,0 +1,206 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -107,5 +107,6 @@
+ bsd/dev/bonito_gpu.c			standard
+ bsd/dev/bonito_reset.c			standard
++bsd/dev/bonito_misc.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+diff --git a/bsd/dev/bonito_misc.c b/bsd/dev/bonito_misc.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/bonito_misc.c
+@@ -0,0 +1,177 @@
++/*
++ * bonito small system features (each controlled by a boot-arg):
++ *
++ *   sweetcpufreq=N   CPU frequency through the OSM hardware DCVS (SDM670 clk-cpu-osm, ABL leaves the clusters slow and
++ *                    nothing under XNU raises them): 0 leave as is, 1 highest all-core frequency, N > 1 the highest
++ *                    all-core entry at or below N MHz (default 0 until it has been measured). The table of each cluster
++ *                    is logged as "SWEET CPUFREQ".
++ *   sweetcpubench=1  after a few seconds, eight threads spin on a dependent add chain and log iterations per second per
++ *                    CPU ("SWEET CPUBENCH", about the CPU clock in MHz): measures what sweetcpufreq changed.
++ *   sweettime=EPOCH  set the calendar clock (seconds since 1970) at boot: the phone has no network time and iOS otherwise
++ *                    starts in January 1970. tools/mkios.sh passes the build time.
++ *
++ * OSM registers (msm-4.9 drivers/clk/qcom/clk-cpu-osm.c, bases from the stock DT qcom,cpucc@17d41000): frequency table at
++ * +0x110 with 32 bytes per row (src [31:30], l_val [7:0], core count [18:16]), the desired table index per core at +0x920.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/cpu_number.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <mach/mach_time.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern int hz;
++void sweet_misc_start(void);
++
++#define OSM_FREQ_REG    0x110u
++#define OSM_ROW         32u
++#define OSM_ROWS        40u
++#define OSM_DESIRED     0x920u
++#define OSM_XO_KHZ      19200u
++#define OSM_INIT_KHZ    300000u
++
++static const struct {
++	const char *name;
++	uint32_t pa;
++} osm_clusters[] = {
++	{ "pwrcl (silver)", 0x17d43000u },
++	{ "perfcl (gold)", 0x17d45800u },
++};
++
++static uint32_t
++osm_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++misc_cpufreq(unsigned want)
++{
++	for (unsigned c = 0; c < sizeof(osm_clusters) / sizeof(osm_clusters[0]); c++) {
++		vm_offset_t base = ml_io_map(osm_clusters[c].pa, 0x1000);
++		if (!base) {
++			printf("SWEET CPUFREQ: %s: map failed\n", osm_clusters[c].name);
++			continue;
++		}
++		uint32_t cur = osm_rd(base, OSM_DESIRED), maxcc = 0;
++		unsigned n = 0, prev_khz = 0, prev_cc = 0, ends = OSM_ROWS;
++		unsigned khz_of[OSM_ROWS], cc_of[OSM_ROWS];
++		char line[300];
++		unsigned len = 0;
++
++		for (unsigned i = 0; i < OSM_ROWS; i++) {
++			uint32_t data = osm_rd(base, OSM_FREQ_REG + i * OSM_ROW);
++			unsigned src = data >> 30, lval = data & 0xffu, cc = (data >> 16) & 7u;
++			unsigned khz = src ? OSM_XO_KHZ * lval : OSM_INIT_KHZ;
++			if (i > 0 && khz == prev_khz && cc == prev_cc) {
++				ends = i;               /* a repeated entry ends the table */
++				break;
++			}
++			khz_of[i] = khz;
++			cc_of[i] = cc;
++			prev_khz = khz;
++			prev_cc = cc;
++			if (cc > maxcc) {
++				maxcc = cc;
++			}
++			n = i + 1;
++		}
++		for (unsigned i = 0; i < n && len < sizeof(line) - 20; i++) {
++			len += (unsigned)snprintf(line + len, sizeof(line) - len, " %u/%u", khz_of[i] / 1000, cc_of[i]);
++		}
++		printf("SWEET CPUFREQ: %s: current index %u, %u rows (end %u), table MHz/cores:%s\n", osm_clusters[c].name, cur, n,
++		    ends, line);
++		if (want == 0 || n == 0) {
++			continue;
++		}
++		unsigned best = n, best_khz = 0;
++		for (unsigned i = 0; i < n; i++) {
++			if (cc_of[i] != maxcc || (want > 1 && khz_of[i] / 1000 > want)) {
++				continue;
++			}
++			if (khz_of[i] > best_khz) {
++				best_khz = khz_of[i];
++				best = i;
++			}
++		}
++		if (best == n) {
++			printf("SWEET CPUFREQ: %s: no suitable entry; kept\n", osm_clusters[c].name);
++			continue;
++		}
++		__asm__ volatile ("dmb oshst" ::: "memory");
++		*(volatile uint32_t *)(base + OSM_DESIRED) = best;
++		__asm__ volatile ("dsb osh" ::: "memory");
++		printf("SWEET CPUFREQ: %s: index %u -> %u (%u MHz, %u cores), reads back %u\n", osm_clusters[c].name, cur, best,
++		    best_khz / 1000, maxcc, osm_rd(base, OSM_DESIRED));
++	}
++}
++
++static int bench_chan;
++static volatile int bench_done;
++
++static void
++bench_thread(void *arg, __unused wait_result_t wr)
++{
++	unsigned id = (unsigned)(uintptr_t)arg;
++	uint64_t t0, t1, ns, iters = 100000000ull, x = 0;
++	int cpu;
++
++	(void)tsleep(&bench_chan, PZERO, "benchwait", hz * 2 + (int)id);   /* staggered so the threads do not all start at once */
++	cpu = cpu_number();
++	t0 = mach_absolute_time();
++	__asm__ volatile (
++		"1:\n\t"
++		"add %0, %0, #1\n\t"
++		"subs %1, %1, #1\n\t"
++		"b.ne 1b\n\t"
++		: "+r" (x), "+r" (iters)
++		:
++		: "cc");
++	t1 = mach_absolute_time();
++	absolutetime_to_nanoseconds(t1 - t0, &ns);
++	printf("SWEET CPUBENCH: thread %u on cpu %d (ended on %d): 100M dependent adds in %llu ms = %llu M/s (about MHz)\n", id,
++	    cpu, cpu_number(), (unsigned long long)(ns / 1000000), (unsigned long long)(100000000000ull / ns));
++	bench_done++;
++	for (;;) {
++		(void)tsleep(&bench_chan, PZERO, "benchidle", hz * 3600);
++	}
++}
++
++void
++sweet_misc_start(void)
++{
++	int freq = 0, bench = 0;
++	unsigned long long epoch = 0;
++	char buf[32];
++	thread_t thread;
++
++	PE_parse_boot_argn("sweetcpufreq", &freq, sizeof(freq));
++	PE_parse_boot_argn("sweetcpubench", &bench, sizeof(bench));
++	if (PE_parse_boot_argn("sweettime", buf, sizeof(buf))) {
++		for (const char *p = buf; *p >= '0' && *p <= '9'; p++) {
++			epoch = epoch * 10 + (unsigned)(*p - '0');
++		}
++	}
++	if (epoch > 1500000000ull) {
++		clock_set_calendar_microtime((clock_sec_t)epoch, 0);
++		printf("SWEET MISC: calendar set to %llu\n", epoch);
++	}
++	if (freq || bench) {
++		misc_cpufreq((unsigned)freq);
++	}
++	if (bench) {
++		for (unsigned i = 0; i < 8; i++) {
++			if (kernel_thread_start(bench_thread, (void *)(uintptr_t)i, &thread) == KERN_SUCCESS) {
++				thread_deallocate(thread);
++			}
++		}
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -950,6 +950,10 @@
+ 		extern void sweet_reset_start(void);
+ 		sweet_reset_start();      /* unattended restarts: timed, after a panic, watchdog (boot-args sweetreboot, sweetpanicreset, sweetwdt): bsd/dev/bonito_reset.c */
+ 	}
++	{
++		extern void sweet_misc_start(void);
++		sweet_misc_start();       /* CPU frequency, CPU benchmark, calendar time (boot-args sweetcpufreq, sweetcpubench, sweettime): bsd/dev/bonito_misc.c */
++	}
+ 	sweet_usb_probe();      /* boot-arg sweetusb=2 (+ sweetusbdma=<low PA>) starts the USB Ethernet gadget: bsd/dev/sweet_usb.c */
+ 	{
+ 		/* sweetusbhold=N: keep the console quiet for N seconds so the USB messages stay on screen (debug) */

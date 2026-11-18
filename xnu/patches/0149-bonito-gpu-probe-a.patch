@@ -12,7 +12,7 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/bonito_gpu.c
-@@ -0,0 +1,1332 @@
+@@ -0,0 +1,1337 @@
 +/*
 + * bonito GPU bring-up probe, stage A (boot-arg sweetgpu=1; sweetgpudelay=SECS before it starts, default 60).
 + *
@@ -1161,9 +1161,14 @@ new file mode 100644
 +	};
 +	rc = g6_ring(dw, sizeof(dw) / 4, NULL, timeout_ms);
 +	g6_pread(G6_OFF_SCRATCH + 0x10, &got, 4);
-+	if (rc || got != fence) {
++	/*
++	 * A translation fault does not make this submit fail, but it stalls the next one until the context bank's FSR is
++	 * cleared (seen in the stage 7 self test): look after every submit, clear it, and report it as -2.
++	 */
++	if (g6_clear_fault()) {
++		rc = -2;
++	} else if (rc || got != fence) {
 +		rc = -1;
-+		(void)g6_clear_fault();
 +	}
 +	lck_mtx_unlock(&g6_lock);
 +	return rc;
@@ -1225,8 +1230,8 @@ new file mode 100644
 +		g6_pwrite(G6_OFF_TEST_IB, ib, sizeof(ib));
 +		ok_after = bonito_gpu_submit(G6_GVA_POOL + G6_OFF_TEST_IB, 4, 300) == 0;
 +		flush_dcache64((addr64_t)g6_buf_pa, 64, TRUE);
-+		printf("SWEET GPU615: selftest: faulting submit rc %d; faults cleared %llu; later good submit %s (buffer %#x)\n", rc,
-+		    (unsigned long long)g6_fault_count, ok_after ? "ok" : "FAILED", *(volatile uint32_t *)g6_buf_kva);
++		printf("SWEET GPU615: selftest: faulting submit rc %d (want -2); faults cleared %llu; later good submit %s (buffer %#x, want 0x600dc0de)\n",
++		    rc, (unsigned long long)g6_fault_count, ok_after ? "ok" : "FAILED", *(volatile uint32_t *)g6_buf_kva);
 +	}
 +	printf("SWEET GPU615: selftest done: %llu submits, %llu faults\n", (unsigned long long)g6_submit_count,
 +	    (unsigned long long)g6_fault_count);
