@@ -12,7 +12,7 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/bonito_gpu.c
-@@ -0,0 +1,1334 @@
+@@ -0,0 +1,1332 @@
 +/*
 + * bonito GPU bring-up probe, stage A (boot-arg sweetgpu=1; sweetgpudelay=SECS before it starts, default 60).
 + *
@@ -723,15 +723,13 @@ new file mode 100644
 +	}
 +	g6_wptr = (w + n) % G6_RING_DW;
 +	g6_wr(G6_GMU(G6_CP_RB_WPTR), g6_wptr);
-+	for (i = 0; i < timeout_ms * 10; i++) {
++	for (i = 0; i < timeout_ms * 500; i++) {                /* about 2 us per iteration plus the register reads */
 +		if (g6_rd(G6_GMU(G6_CP_RB_RPTR)) == g6_wptr && !(g6_rd(G6_GMU(G6_RBBM_STATUS)) & (1u << 23))) {
 +			break;
 +		}
-+		if ((i & 7) == 7) {
-+			delay(1000);
-+		}
++		delay(2);
 +	}
-+	bool ok = i < timeout_ms * 10;
++	bool ok = i < timeout_ms * 500;
 +	if (what || !ok) {
 +		printf("SWEET GPU615: ring %s: rptr %#x wptr %#x rbbm_status %#x int %#x hw_fault %#x cp_status_1 %#x %s\n",
 +		    what ? what : "(work)", g6_rd(G6_GMU(G6_CP_RB_RPTR)), g6_wptr, g6_rd(G6_GMU(G6_RBBM_STATUS)),
