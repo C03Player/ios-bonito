@@ -5,7 +5,12 @@ Nobody has to touch the phone between tests. Verified on the phone 2026-11-18.
     bonito/tools/mkios.sh KERNEL NAME "extra boot-args"      # builds bonito/shim/out/NAME.img (standard native config)
     bonito/tools/cycle.sh bonito/shim/out/NAME.img NAME [WAIT_S]   # boot it, wait, pull logs/NAME.txt, back to bootloader
 
-`mkios.sh` always adds `sweetpanicreset=1 sweetwdt=25`. **Add `sweetreboot=SECS` to every normal test** (for example 90 for a plain
+`bonito/tools/ci-cycle.sh RUN_ID NAME "boot-args" [WAIT_S] [MARKER]` does both for a finished CI run (fetch the kernel, check that a marker
+string is inside it, build, cycle). `SAMPLE=name,name` in the environment turns the process stack sampler on (boot-args sweetsampledelay,
+sweetsampleperiod, patch 0152).
+
+`mkios.sh` always adds `sweetpanicreset=1 sweetwdt=25 sweettime=<build time>` and the process deny list `sweetdeny=` (the radios plus AegirPoster and the speech
+synthesizers, which crash-loop without a GPU). `sweetshot` is not in the standard line: the command line is limited to 591 characters. **Add `sweetreboot=SECS` to every normal test** (for example 90 for a plain
 boot, 240 for the GPU probe stages), otherwise iOS keeps running and `cycle.sh` waits out its timeout and exits 1.
 
 How the phone gets back to the log-reading recovery by itself (xnu patch 0150, bsd/dev/bonito_reset.c):
