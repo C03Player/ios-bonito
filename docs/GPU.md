@@ -69,6 +69,14 @@ compiled into the kernel), and replace the A640-specific parts. Facts gathered f
 Milestones: C1 = GX power domain on (gx_gdsc on, HFI acked); C2 = CP microcode loaded, zap shader accepted, ring runs ME_INIT;
 C3 = a CP_MEM_WRITE fence lands in memory.
 
+## Stage C1 result (2026-11-18, patch 0149 with sweetgpu=3, log logs/gpu4.txt): GX RAIL ON
+cmd-db (read via the pointer register 0xc3f000c, magic 0x0c0330db) ARC levels: gfx.lvl 0 16 48 64 128 192 256 320 384 416;
+mx.lvl 0 16 16 256 384; cx.lvl 0 16 48 64 128 192 256 384. Level 64 (LOW_SVS) -> gx index 3, mx index 3. The OOB handshake
+(BOOT_SLUMBER_OPTION 0, GX_VOTE_IDX 3, MX_VOTE_IDX 3, HOST2GMU_INTR_SET bit 22, ack = bit 30 of GMU2HOST_INTR_INFO, cleared
+through GMU2HOST_INTR_CLR) was acked and the GPU CC GX GDSC went from 0x222001 to 0xf8222000 (power on). No HFI was needed.
+Next (C2): SPTPRAC power on (GMU_GX_SPTPRAC_POWER_CONTROL 0x1a881 = 0x778000), prove GPU core register access, then SMMU
+context for the GPU, SQE microcode, zap shader (SCM PAS 13, region 0x95c15000), ring + ME_INIT, then the fence packet (C3).
+
 ## Reference work to reuse
 `third_party/ios-flame` (Pixel 4, Adreno 640) already has the whole stack; see its `METAL-NEXT.md`:
 kernel A6xx bring-up (`bsd/dev/sweet_a6xx.c`, patches 0095..0122 in xnu/patches), `SweetAccelerator` (IOAcceleratorES +
