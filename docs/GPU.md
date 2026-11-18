@@ -106,6 +106,18 @@ The whole bring-up (GMU boot, GX, SMMU, SQE, zap, ring) takes about 1 s with `sw
 Next: replace the staged probe by a persistent kernel service (bring-up once at boot without pauses; lock; map/unmap of
 arbitrary page lists; submit with a timeout and fault recovery), then the IOAccelerator service.
 
+## Stage 6 result (2026-11-18 23:22, patch 0149 with sweetgpu=6, log logs/gpusvc1.txt): THE SERVICE LAYER HOLDS
+bonito_gpu_ready / bonito_gpu_va_alloc / bonito_gpu_map_pages / bonito_gpu_unmap / bonito_gpu_submit (all under one mutex; a
+translation fault is cleared and reported). Boot self test: 4 x 16 KiB pages mapped at GPU VA 0x200000000, then 2000 submits of
+an IB with a CP_MEM_WRITE, each read back: 0 bad, 0 faults. 1161 us per submit and verify with a 1 ms polling sleep (since
+changed to 2 us polling; stage 7 adds an unmap + fault + recovery test). The whole bring-up still ends well inside 30 s of the
+probe start, and the watchdog never fired.
+
+Userland constraint found while planning the Metal layer: the Pixel 4 port installs userland bundles over USB networking (ssh).
+The bonito port has no network yet, so adding a bundle (for example /System/Library/Extensions/<Metal plugin>.bundle) means
+rebuilding the iOS root image and reflashing it (flash-sparse.py, about 20 minutes), or a way to write files into the HFS+ root
+from the recovery. A network path (USB gadget or Wi-Fi) would make the userland work much faster to iterate on.
+
 ## Reference work to reuse
 `third_party/ios-flame` (Pixel 4, Adreno 640) already has the whole stack; see its `METAL-NEXT.md`:
 kernel A6xx bring-up (`bsd/dev/sweet_a6xx.c`, patches 0095..0122 in xnu/patches), `SweetAccelerator` (IOAcceleratorES +
