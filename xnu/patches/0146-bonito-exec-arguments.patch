@@ -1,0 +1,59 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5702,6 +5702,55 @@
+ 		imgp->ip_argc++;
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		/*
++		 * Boot-arg sweetargs=PROCESS,KEY,VALUE (<= 159 characters): the process whose executable has that name gets
++		 * "-KEY VALUE" appended to its arguments, which NSUserDefaults reads as its argument domain. Used for
++		 * UIKit's UIStatusBarVisualProviderClassName (read from the com.apple.UIKit suite) so SpringBoard gets a
++		 * status bar layout for a screen size UIKit has none for.
++		 */
++		static char sweet_arg[160], sweet_dashkey[100];
++		static char *sweet_proc, *sweet_val;
++		static int sweet_arg_state;     /* 0 not read, 1 none, 2 set */
++
++		if (sweet_arg_state == 0) {
++			sweet_arg_state = 1;
++			if (PE_parse_boot_argn("sweetargs", sweet_arg, sizeof(sweet_arg)) && sweet_arg[0]) {
++				char *key = strchr(sweet_arg, ',');
++				char *val = key ? strchr(key + 1, ',') : NULL;
++				if (key != NULL && val != NULL) {
++					*key++ = '\0';
++					*val++ = '\0';
++					snprintf(sweet_dashkey, sizeof(sweet_dashkey), "-%s", key);
++					sweet_proc = sweet_arg;
++					sweet_val = val;
++					sweet_arg_state = 2;
++				}
++			}
++		}
++		if (sweet_arg_state == 2 && imgp->ip_argc > 0) {
++			const char *a0 = imgp->ip_startargv;
++			const char *base = strrchr(a0, '/');
++			base = base ? base + 1 : a0;
++			if (strcmp(base, sweet_proc) == 0) {
++				const char *extra[2] = { sweet_dashkey, sweet_val };
++				for (int n = 0; n < 2; n++) {
++					error = exec_add_user_string(imgp, CAST_USER_ADDR_T(extra[n]), UIO_SYSSPACE, TRUE);
++					if (error) {
++						goto bad;
++					}
++					if (imgp->ip_argspace < new_ptr_size) {
++						error = E2BIG;
++						goto bad;
++					}
++					imgp->ip_argspace -= new_ptr_size;
++					imgp->ip_argc++;
++				}
++			}
++		}
++	}
++#endif
+ 	/* Save space for argv[] NULL terminator */
+ 	if (imgp->ip_argspace < new_ptr_size) {
+ 		error = E2BIG;
