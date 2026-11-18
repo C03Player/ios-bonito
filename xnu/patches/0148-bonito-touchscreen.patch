@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -700,7 +700,859 @@
+@@ -700,7 +700,872 @@
  		thread_deallocate(thread);
  	}
  }
@@ -559,7 +559,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		uint32_t bit = 1u << id;
 +		if (mask & bit) {
 +			if (!(bt.active & bit) || x[id] != bt.x[id] || y[id] != bt.y[id]) {
-+				if (bt.log || bt.reports < 40) {
++				if (bt.log || bt.reports < 8) {
 +					printf("SWEET BTOUCH: finger %u down at %d,%d\n", id, x[id], y[id]);
 +					bt.reports++;
 +				}
@@ -568,7 +568,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +			bt.x[id] = x[id];
 +			bt.y[id] = y[id];
 +		} else if (bt.active & bit) {
-+			if (bt.log || bt.reports < 40) {
++			if (bt.log || bt.reports < 8) {
 +				printf("SWEET BTOUCH: finger %u up\n", id);
 +				bt.reports++;
 +			}
@@ -655,7 +655,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	int err = bt_rmi_write(0xff, 0);
 +	if (err) {
 +		printf("SWEET BTOUCH: GENI I2C: no answer from %#x (err %d, irq-status %#x, se status %#x, scl %d sda %d)\n",
-+		    BT_ADDR, err, bt.irq_status, bt_rd(bt.se, BT_SE_STATUS), bt_pin(bt.north, BT_PIN_SCL),
++		    BT_ADDR, err, bt.irq_status, bt.bb ? 0 : bt_rd(bt.se, BT_SE_STATUS), bt_pin(bt.north, BT_PIN_SCL),
 +		    bt_pin(bt.north, BT_PIN_SDA));
 +		bt.bb = true;
 +		bt.dead = false;
@@ -775,11 +775,12 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +static void
 +bt_thread(__unused void *arg, __unused wait_result_t wr)
 +{
-+	int delay_s = 20, power = 1;
++	int delay_s = 10, power = 1, geni = 0;
 +	unsigned errors = 0, ticks = 0;
 +
 +	PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
 +	PE_parse_boot_argn("sweettouchpower", &power, sizeof(power));
++	PE_parse_boot_argn("sweettouchgeni", &geni, sizeof(geni));
 +	PE_parse_boot_argn("sweettouchlog", &bt.log, sizeof(bt.log));
 +	printf("SWEET BTOUCH: starting in %d s\n", delay_s);
 +	bt_wait((unsigned)delay_s * 1000u);
@@ -795,12 +796,24 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	    bt_rd(bt.north, BT_PIN_SDA * 0x1000u), bt_rd(bt.north, BT_PIN_SCL * 0x1000u),
 +	    bt_rd(bt.north, BT_PIN_RESET * 0x1000u), bt_rd(bt.north, BT_PIN_IRQ * 0x1000u),
 +	    bt_rd(bt.west, BT_PIN_SWITCH * 0x1000u));
-+	if (!bt_clocks() || !bt_se_init()) {
-+		goto out;
++	/*
++	 * The GENI engine reaches the IC but its register reads return zeros (cause not found), so the bus is bit-banged by
++	 * default; sweettouchgeni=1 tries the engine first (and falls back to bit-banging if its table read is empty).
++	 */
++	if (geni) {
++		if (!bt_clocks() || !bt_se_init()) {
++			goto out;
++		}
++	} else {
++		bt.bb = true;
 +	}
 +	bt_gpio(bt.west, BT_PIN_SWITCH, 0, 0, 0, true, false);  /* application processor owns the touch bus */
-+	bt_gpio(bt.north, BT_PIN_SDA, 1, 0, 0, false, false);   /* qup9, 2 mA, no pull */
-+	bt_gpio(bt.north, BT_PIN_SCL, 1, 0, 0, false, false);
++	if (geni) {
++		bt_gpio(bt.north, BT_PIN_SDA, 1, 0, 0, false, false);   /* qup9, 2 mA, no pull */
++		bt_gpio(bt.north, BT_PIN_SCL, 1, 0, 0, false, false);
++	} else {
++		bb_setup();
++	}
 +	bt_gpio(bt.north, BT_PIN_IRQ, 0, 0, 0, false, false);   /* interrupt input, no pull */
 +	bt_gpio(bt.north, BT_PIN_RESET, 0, 0, 0, true, true);   /* reset released */
 +	if (power) {
