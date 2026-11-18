@@ -1,0 +1,37 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5741,6 +5741,33 @@
+ 		imgp->ip_envc++;
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		/*
++		 * Boot-arg sweetenv=NAME=VALUE (<= 127 characters): one extra environment string for every process the kernel
++		 * executes. Used to hand UIKit a status bar layout class for a screen size it has none for
++		 * (UIStatusBarVisualProviderClassName=_UIStatusBarVisualProvider_Split1080).
++		 */
++		static char sweet_env[128];
++		static int sweet_env_state;     /* 0 not read, 1 none, 2 set */
++
++		if (sweet_env_state == 0) {
++			sweet_env_state = PE_parse_boot_argn("sweetenv", sweet_env, sizeof(sweet_env)) && sweet_env[0] ? 2 : 1;
++		}
++		if (sweet_env_state == 2) {
++			error = exec_add_user_string(imgp, CAST_USER_ADDR_T(sweet_env), UIO_SYSSPACE, TRUE);
++			if (error) {
++				goto bad;
++			}
++			if (imgp->ip_argspace < new_ptr_size) {
++				error = E2BIG;
++				goto bad;
++			}
++			imgp->ip_argspace -= new_ptr_size;
++			imgp->ip_envc++;
++		}
++	}
++#endif
+ 	/* Save space for envv[] NULL terminator */
+ 	if (imgp->ip_argspace < new_ptr_size) {
+ 		error = E2BIG;
