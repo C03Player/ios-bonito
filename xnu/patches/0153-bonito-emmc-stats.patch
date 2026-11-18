@@ -1,0 +1,48 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -548,6 +548,7 @@
+ sweet_ufs_strategy(buf_t bp)
+ {
+ 	int error = 0;
++	uint64_t t_start = 0;
+ 	caddr_t vaddr = NULL;
+ 	uint64_t off = (uint64_t)buf_blkno(bp) * su.secsize;
+ 	uint32_t count = buf_count(bp);
+@@ -572,6 +573,7 @@
+ 		goto done;
+ 	}
+ 
++	t_start = mach_absolute_time();
+ 	lck_mtx_lock(&sweet_ufs_lock);
+ 	for (uint32_t done = 0; done < count;) {
+ 		uint64_t pos = off + done;
+@@ -602,6 +604,28 @@
+ 		buf_setresid(bp, count - done);
+ 	}
+ 	lck_mtx_unlock(&sweet_ufs_lock);
++	{
++		/* I/O statistics, logged every 5 seconds (SWEET EMMC stats): how busy the eMMC is and how large the requests are. */
++		static uint64_t st_bytes_r, st_bytes_w, st_busy, st_reqs, st_last;
++		uint64_t now = mach_absolute_time(), busy_ns, since_ns, last;
++		uint32_t done_bytes = count - buf_resid(bp);
++
++		absolutetime_to_nanoseconds(now - t_start, &busy_ns);
++		__atomic_fetch_add(rd ? &st_bytes_r : &st_bytes_w, (uint64_t)done_bytes, __ATOMIC_RELAXED);
++		__atomic_fetch_add(&st_busy, busy_ns, __ATOMIC_RELAXED);
++		__atomic_fetch_add(&st_reqs, 1, __ATOMIC_RELAXED);
++		last = __atomic_load_n(&st_last, __ATOMIC_RELAXED);
++		absolutetime_to_nanoseconds(now - last, &since_ns);
++		if (last == 0) {
++			__atomic_store_n(&st_last, now, __ATOMIC_RELAXED);
++		} else if (since_ns >= 5000000000ull && __atomic_compare_exchange_n(&st_last, &last, now, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
++			uint64_t r = __atomic_exchange_n(&st_bytes_r, 0, __ATOMIC_RELAXED), w = __atomic_exchange_n(&st_bytes_w, 0, __ATOMIC_RELAXED);
++			uint64_t busy = __atomic_exchange_n(&st_busy, 0, __ATOMIC_RELAXED), reqs = __atomic_exchange_n(&st_reqs, 0, __ATOMIC_RELAXED);
++			printf("SWEET EMMC stats: %llu ms: %llu requests, %llu KiB read, %llu KiB written, busy %llu ms (%llu%%), %llu KiB per request, %llu MB/s while busy\n",
++			    since_ns / 1000000, reqs, r / 1024, w / 1024, busy / 1000000, busy * 100 / (since_ns ? since_ns : 1),
++			    reqs ? (r + w) / 1024 / reqs : 0, busy ? (r + w) * 1000 / busy : 0);
++		}
++	}
+ 	buf_unmap(bp);
+ 
+ done:
