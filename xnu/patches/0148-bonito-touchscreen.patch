@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -700,7 +700,872 @@
+@@ -700,7 +700,904 @@
  		thread_deallocate(thread);
  	}
  }
@@ -60,7 +60,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +#define BT_SE_EVENTS    (BT_SE_DONE | BT_SE_ERRORS | (1u << 5) | (1u << 26) | (1u << 27) | (1u << 30))
 +
 +static struct {
-+	vm_offset_t se, gcc, north, west;
++	vm_offset_t se, gcc;
 +	bool dead;
 +	int log;
 +	uint32_t irq_status;
@@ -111,23 +111,54 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	return false;
 +}
 +
++/*
++ * TLMM pin registers, mapped one page per pin on first use (the kernel's I/O mapping space is small; whole tiles of
++ * 0x7e000 and 0x88000 bytes failed other mappings with KERN_NO_SPACE). The pin's registers are at tile + pin * 0x1000.
++ */
++static struct {
++	unsigned pin;
++	vm_offset_t va;
++} bt_pm[8];
++static unsigned bt_npm;
++
++static vm_offset_t
++bt_pinreg(unsigned pin)
++{
++	for (unsigned i = 0; i < bt_npm; i++) {
++		if (bt_pm[i].pin == pin) {
++			return bt_pm[i].va;
++		}
++	}
++	if (bt_npm == 8) {
++		return 0;
++	}
++	vm_offset_t va = ml_io_map((pin == BT_PIN_SWITCH ? BT_WEST_PA : BT_NORTH_PA) + pin * 0x1000u, 0x1000);
++	if (!va) {
++		return 0;
++	}
++	bt_pm[bt_npm].pin = pin;
++	bt_pm[bt_npm].va = va;
++	bt_npm++;
++	return va;
++}
++
 +/* TLMM pin: [1:0] pull (0 none, 1 down, 2 keeper, 3 up), [5:2] function, [8:6] drive (mA/2 - 1), [9] output enable. */
 +static void
-+bt_gpio(vm_offset_t base, unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
++bt_gpio(unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
 +{
-+	uint32_t off = pin * 0x1000u;
++	vm_offset_t r = bt_pinreg(pin);
 +	if (out) {
-+		bt_wr(base, off + 4u, (bt_rd(base, off + 4u) & ~2u) | (high ? 2u : 0u));
++		bt_wr(r, 4u, (bt_rd(r, 4u) & ~2u) | (high ? 2u : 0u));
 +	}
-+	uint32_t cfg = bt_rd(base, off) & ~0x3ffu;
++	uint32_t cfg = bt_rd(r, 0) & ~0x3ffu;
 +	cfg |= (mux << 2) | pull | (drive << 6) | (out ? 0x200u : 0u);
-+	bt_wr(base, off, cfg);
++	bt_wr(r, 0, cfg);
 +}
 +
 +static bool
-+bt_pin(vm_offset_t base, unsigned pin)
++bt_pin(unsigned pin)
 +{
-+	return bt_rd(base, pin * 0x1000u + 4u) & 1u;
++	return bt_rd(bt_pinreg(pin), 4u) & 1u;
 +}
 +
 +/* Vote on only wrapper 1 and its engine 1 (engine 9 overall), preserving other clock users. */
@@ -304,12 +335,13 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +static void
 +bb_pin(unsigned pin, bool high)
 +{
-+	uint32_t off = pin * 0x1000u, cfg = bt_rd(bt.north, off);
++	vm_offset_t r = bt_pinreg(pin);
++	uint32_t cfg = bt_rd(r, 0);
 +	if (high) {
-+		bt_wr(bt.north, off, cfg & ~0x200u);
++		bt_wr(r, 0, cfg & ~0x200u);
 +	} else {
-+		bt_wr(bt.north, off + 4u, bt_rd(bt.north, off + 4u) & ~2u);
-+		bt_wr(bt.north, off, cfg | 0x200u);
++		bt_wr(r, 4u, bt_rd(r, 4u) & ~2u);
++		bt_wr(r, 0, cfg | 0x200u);
 +	}
 +}
 +
@@ -325,7 +357,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +{
 +	bb_pin(BT_PIN_SCL, h);
 +	if (h) {
-+		for (unsigned i = 0; i < 200 && !bt_pin(bt.north, BT_PIN_SCL); i++) {
++		for (unsigned i = 0; i < 200 && !bt_pin(BT_PIN_SCL); i++) {
 +			delay(5);
 +		}
 +	}
@@ -337,13 +369,13 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +{
 +	for (unsigned k = 0; k < 2; k++) {
 +		unsigned pin = k ? BT_PIN_SCL : BT_PIN_SDA;
-+		uint32_t off = pin * 0x1000u;
-+		bt_wr(bt.north, off + 4u, bt_rd(bt.north, off + 4u) & ~2u);
-+		bt_wr(bt.north, off, (bt_rd(bt.north, off) & ~0x3ffu) | 3u);     /* GPIO, pull-up, output off */
++		vm_offset_t r = bt_pinreg(pin);
++		bt_wr(r, 4u, bt_rd(r, 4u) & ~2u);
++		bt_wr(r, 0, (bt_rd(r, 0) & ~0x3ffu) | 3u);     /* GPIO, pull-up, output off */
 +	}
 +	delay(100);
-+	printf("SWEET BTOUCH: bit-bang pins: sda %d scl %d\n", bt_pin(bt.north, BT_PIN_SDA), bt_pin(bt.north, BT_PIN_SCL));
-+	if (!bt_pin(bt.north, BT_PIN_SDA) || !bt_pin(bt.north, BT_PIN_SCL)) {
++	printf("SWEET BTOUCH: bit-bang pins: sda %d scl %d\n", bt_pin(BT_PIN_SDA), bt_pin(BT_PIN_SCL));
++	if (!bt_pin(BT_PIN_SDA) || !bt_pin(BT_PIN_SCL)) {
 +		bt.bus_stuck = true;
 +		printf("SWEET BTOUCH: an I2C line is held low (touch IC unpowered or hung); an ACK now would be meaningless\n");
 +	}
@@ -376,7 +408,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	}
 +	bb_sda(true);
 +	bb_scl(true);
-+	bool ack = !bt_pin(bt.north, BT_PIN_SDA);
++	bool ack = !bt_pin(BT_PIN_SDA);
 +	bb_scl(false);
 +	return ack;
 +}
@@ -388,7 +420,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	bb_sda(true);
 +	for (unsigned i = 0; i < 8; i++) {
 +		bb_scl(true);
-+		v = (uint8_t)((v << 1) | bt_pin(bt.north, BT_PIN_SDA));
++		v = (uint8_t)((v << 1) | bt_pin(BT_PIN_SDA));
 +		bb_scl(false);
 +	}
 +	bb_sda(!ack);
@@ -655,8 +687,8 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	int err = bt_rmi_write(0xff, 0);
 +	if (err) {
 +		printf("SWEET BTOUCH: GENI I2C: no answer from %#x (err %d, irq-status %#x, se status %#x, scl %d sda %d)\n",
-+		    BT_ADDR, err, bt.irq_status, bt.bb ? 0 : bt_rd(bt.se, BT_SE_STATUS), bt_pin(bt.north, BT_PIN_SCL),
-+		    bt_pin(bt.north, BT_PIN_SDA));
++		    BT_ADDR, err, bt.irq_status, bt.bb ? 0 : bt_rd(bt.se, BT_SE_STATUS), bt_pin(BT_PIN_SCL),
++		    bt_pin(BT_PIN_SDA));
 +		bt.bb = true;
 +		bt.dead = false;
 +		bb_setup();
@@ -694,7 +726,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +			int e = bt_rmi_read((uint8_t)pdt, d, 6);
 +			if (pdt == 0xe9) {
 +				printf("SWEET BTOUCH: try %u: pdt@e9 err %d: %02x %02x %02x %02x %02x %02x (irq pin %d)\n", attempt, e,
-+				    d[0], d[1], d[2], d[3], d[4], d[5], bt_pin(bt.north, BT_PIN_IRQ));
++				    d[0], d[1], d[2], d[3], d[4], d[5], bt_pin(BT_PIN_IRQ));
 +			}
 +			if (e || d[5] == 0 || d[5] == 0xff) {
 +				break;
@@ -784,18 +816,18 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	PE_parse_boot_argn("sweettouchlog", &bt.log, sizeof(bt.log));
 +	printf("SWEET BTOUCH: starting in %d s\n", delay_s);
 +	bt_wait((unsigned)delay_s * 1000u);
-+	bt.gcc = ml_io_map(BT_GCC_PA, 0x60000);
-+	bt.north = ml_io_map(BT_NORTH_PA, 0x7e000);
-+	bt.west = ml_io_map(BT_WEST_PA, 0x88000);
-+	bt.se = ml_io_map(BT_SE_PA, 0x4000);
-+	if (!bt.gcc || !bt.north || !bt.west || !bt.se || !bt_spmi_map()) {
++	if (geni) {
++		bt.gcc = ml_io_map(BT_GCC_PA, 0x60000);
++		bt.se = ml_io_map(BT_SE_PA, 0x4000);
++	}
++	if ((geni && (!bt.gcc || !bt.se)) || !bt_pinreg(BT_PIN_SDA) || !bt_pinreg(BT_PIN_SCL) || !bt_pinreg(BT_PIN_RESET) ||
++	    !bt_pinreg(BT_PIN_IRQ) || !bt_pinreg(BT_PIN_SWITCH) || !bt_spmi_map()) {
 +		printf("SWEET BTOUCH: MMIO mapping failed\n");
 +		goto out;
 +	}
 +	printf("SWEET BTOUCH: pins before: sda/scl %#x/%#x reset %#x irq %#x switch %#x\n",
-+	    bt_rd(bt.north, BT_PIN_SDA * 0x1000u), bt_rd(bt.north, BT_PIN_SCL * 0x1000u),
-+	    bt_rd(bt.north, BT_PIN_RESET * 0x1000u), bt_rd(bt.north, BT_PIN_IRQ * 0x1000u),
-+	    bt_rd(bt.west, BT_PIN_SWITCH * 0x1000u));
++	    bt_rd(bt_pinreg(BT_PIN_SDA), 0), bt_rd(bt_pinreg(BT_PIN_SCL), 0), bt_rd(bt_pinreg(BT_PIN_RESET), 0),
++	    bt_rd(bt_pinreg(BT_PIN_IRQ), 0), bt_rd(bt_pinreg(BT_PIN_SWITCH), 0));
 +	/*
 +	 * The GENI engine reaches the IC but its register reads return zeros (cause not found), so the bus is bit-banged by
 +	 * default; sweettouchgeni=1 tries the engine first (and falls back to bit-banging if its table read is empty).
@@ -807,33 +839,33 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	} else {
 +		bt.bb = true;
 +	}
-+	bt_gpio(bt.west, BT_PIN_SWITCH, 0, 0, 0, true, false);  /* application processor owns the touch bus */
++	bt_gpio(BT_PIN_SWITCH, 0, 0, 0, true, false);  /* application processor owns the touch bus */
 +	if (geni) {
-+		bt_gpio(bt.north, BT_PIN_SDA, 1, 0, 0, false, false);   /* qup9, 2 mA, no pull */
-+		bt_gpio(bt.north, BT_PIN_SCL, 1, 0, 0, false, false);
++		bt_gpio(BT_PIN_SDA, 1, 0, 0, false, false);   /* qup9, 2 mA, no pull */
++		bt_gpio(BT_PIN_SCL, 1, 0, 0, false, false);
 +	} else {
 +		bb_setup();
 +	}
-+	bt_gpio(bt.north, BT_PIN_IRQ, 0, 0, 0, false, false);   /* interrupt input, no pull */
-+	bt_gpio(bt.north, BT_PIN_RESET, 0, 0, 0, true, true);   /* reset released */
++	bt_gpio(BT_PIN_IRQ, 0, 0, 0, false, false);   /* interrupt input, no pull */
++	bt_gpio(BT_PIN_RESET, 0, 0, 0, true, true);   /* reset released */
 +	if (power) {
 +		bt_pmic_supply(12);
 +		bt_pmic_supply(13);
 +	}
 +	bt_wait(50);
-+	bt_gpio(bt.north, BT_PIN_RESET, 0, 0, 0, true, false);  /* reset pulse (active low) */
++	bt_gpio(BT_PIN_RESET, 0, 0, 0, true, false);  /* reset pulse (active low) */
 +	bt_wait(5);
-+	bt_gpio(bt.north, BT_PIN_RESET, 0, 0, 0, true, true);
++	bt_gpio(BT_PIN_RESET, 0, 0, 0, true, true);
 +	bt_wait(300);
-+	printf("SWEET BTOUCH: after reset: irq pin %d reset pin %d\n", bt_pin(bt.north, BT_PIN_IRQ),
-+	    bt_pin(bt.north, BT_PIN_RESET));
++	printf("SWEET BTOUCH: after reset: irq pin %d reset pin %d\n", bt_pin(BT_PIN_IRQ),
++	    bt_pin(BT_PIN_RESET));
 +	if (!bt_rmi_init()) {
 +		printf("SWEET BTOUCH: touch IC not usable (dead=%d); stopping\n", bt.dead);
 +		goto out;
 +	}
 +	printf("SWEET BTOUCH: running, %dx%d, polled\n", BT_PANEL_W, BT_PANEL_H);
 +	while (!bt.dead) {
-+		if (bt.active || !bt_pin(bt.north, BT_PIN_IRQ) || (++ticks % 25u) == 0) {
++		if (bt.active || !bt_pin(BT_PIN_IRQ) || (++ticks % 25u) == 0) {
 +			int err = bt_poll();
 +			if (err) {
 +				if ((errors++ % 100u) == 0) {
