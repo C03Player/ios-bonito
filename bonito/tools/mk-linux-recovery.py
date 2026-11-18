@@ -44,13 +44,21 @@ def patch_rc(text):
              f'    write {g}/functions/mass_storage.0/lun.0/ro 1\n'
              f'    write {g}/functions/mass_storage.0/lun.0/removable 0\n'
              f'    write {g}/functions/mass_storage.0/lun.0/file /dev/block/mmcblk0\n'
+             # LUN 1: a 3 MB RAM file that the sweetdiag service below fills with dmesg & co (read it as raw sectors)
+             f'    copy /system/bin/update_engine_sideload /dev/diag.img\n'   # init builtin: 3 MB seed file for LUN 1
+             f'    mkdir {g}/functions/mass_storage.0/lun.1\n'
+             f'    write {g}/functions/mass_storage.0/lun.1/ro 1\n'
+             f'    write {g}/functions/mass_storage.0/lun.1/removable 0\n'
+             f'    write {g}/functions/mass_storage.0/lun.1/file /dev/diag.img\n'
              f'    symlink {g}/functions/mass_storage.0 {g}/configs/b.1/f2\n')
     text = text.replace(anchor, anchor + block)
     # Hand the phone back to the bootloader by itself after SWEET_WINDOW seconds: adb is not authorised, so nobody can
     # do it remotely, and the recovery screen is not something to rely on.
     text += (f'\nservice sweetreboot /system/bin/sh -c "sleep {WINDOW}; /system/bin/reboot bootloader"\n'
              '    user root\n    seclabel u:r:recovery:s0\n    oneshot\n    disabled\n'
-             '\non boot\n    start sweetreboot\n')
+             '\nservice sweetdiag /system/bin/sh -c "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do sleep 15; (date; uname -a; echo; cat /proc/partitions; echo; ls -l /dev/block/ /dev/block/bootdevice/by-name; echo; getprop; echo; dmesg; echo; echo ====SWEET-END====) 2>&1 | head -c 3000000 | dd of=/dev/diag.img conv=notrunc; done"\n'
+             '    user root\n    seclabel u:r:recovery:s0\n    oneshot\n    disabled\n'
+             '\non boot\n    start sweetreboot\n    start sweetdiag\n')
     return text
 
 def patch_props(lines):
@@ -134,6 +142,14 @@ def main(src, dst, prop_in, keys_in=None):
     pad = lambda b: b + b'\0' * (up(len(b)) - len(b))
     body = pad(kernel) + pad(new_rd) + pad(second) + pad(dtbo) + pad(dtb)
     hdr = bytearray(d[:page])
+    # SELinux is enforcing in the recovery and the mass-storage gadget reads its backing file from a kernel thread,
+    # which the policy denies (READ -> "unrecovered read error", even for a RAM file). Lineage is a userdebug build, so
+    # init honours androidboot.selinux=permissive from the kernel command line.
+    cmd = hdr[64:576].split(b'\0')[0]
+    if b'androidboot.selinux=' not in cmd:
+        cmd += b' androidboot.selinux=permissive'
+    assert len(cmd) < 512, len(cmd)
+    hdr[64:576] = cmd.ljust(512, b'\0')
     struct.pack_into('<I', hdr, 16, len(new_rd))
     struct.pack_into('<Q', hdr, 1636, page + len(pad(kernel)) + len(pad(new_rd)) + len(pad(second)))
     # id field = sha1 over kernel, ramdisk, second, dtbo(+size), dtb

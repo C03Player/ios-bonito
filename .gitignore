@@ -15,3 +15,4 @@ out/
 logs_flash.txt
 docker/
 bonito/research/
+__pycache__/
