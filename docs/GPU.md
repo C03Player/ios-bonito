@@ -98,6 +98,14 @@ client with info/alloc/free/import/submit/wait selectors); (3) the userland Meta
 pipelines compiled on a Mac, so the plan is the on-device path from its METAL-NEXT.md: Metal frontend -> metal2vulkan (AIR to
 SPIR-V) -> Mesa Turnip built for iOS with a darwin kernel backend -> the kernel user client. That is the large part.
 
+## Stage C4 result (2026-11-18, patch 0149 with sweetgpu=5 sweetgpufast=1, log logs/gpu8.txt): MAPPINGS AND IBs WORK
+A 64 KiB kernel buffer (allocated contiguous at boot) mapped with 4 KiB pages at GPU VA 0x100000000 (L1 index 4: two new
+tables from the arena) and an indirect buffer in the pool (GPU VA 0x10300000) with two CP_MEM_WRITEs: both markers landed in
+the two 4 KiB pages (0xc0ffee11, 0xc0ffee22), the fence written after CP_INDIRECT_BUFFER + WAIT_FOR_IDLE landed, no fault.
+The whole bring-up (GMU boot, GX, SMMU, SQE, zap, ring) takes about 1 s with `sweetgpufast=1`.
+Next: replace the staged probe by a persistent kernel service (bring-up once at boot without pauses; lock; map/unmap of
+arbitrary page lists; submit with a timeout and fault recovery), then the IOAccelerator service.
+
 ## Reference work to reuse
 `third_party/ios-flame` (Pixel 4, Adreno 640) already has the whole stack; see its `METAL-NEXT.md`:
 kernel A6xx bring-up (`bsd/dev/sweet_a6xx.c`, patches 0095..0122 in xnu/patches), `SweetAccelerator` (IOAcceleratorES +
