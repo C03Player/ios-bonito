@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -700,7 +700,851 @@
+@@ -700,7 +700,859 @@
  		thread_deallocate(thread);
  	}
  }
@@ -677,7 +677,14 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	}
 +	bool f01 = false, f12 = false;
 +	uint8_t f12q = 0, f12c = 0, f12d = 0;
-+	for (unsigned attempt = 0; attempt < 8 && !f01 && !bt.dead; attempt++) {
++	for (unsigned pass = 0; pass < 2 && !f01; pass++) {
++	if (pass) {
++		printf("SWEET BTOUCH: GENI table empty; repeating the read bit-banged to compare\n");
++		bt.bb = true;
++		bt.dead = false;
++		bb_setup();
++	}
++	for (unsigned attempt = 0; attempt < (pass ? 3u : 4u) && !f01 && !bt.dead; attempt++) {
 +		if (attempt) {
 +			bt_wait(500);
 +		}
@@ -705,6 +712,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +				f12d = d[3];
 +			}
 +		}
++	}
 +	}
 +	if (!f01) {
 +		/* Diagnostics: other pages and raw bytes around the table. */
