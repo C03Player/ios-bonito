@@ -77,6 +77,13 @@ through GMU2HOST_INTR_CLR) was acked and the GPU CC GX GDSC went from 0x222001 t
 Next (C2): SPTPRAC power on (GMU_GX_SPTPRAC_POWER_CONTROL 0x1a881 = 0x778000), prove GPU core register access, then SMMU
 context for the GPU, SQE microcode, zap shader (SCM PAS 13, region 0x95c15000), ring + ME_INIT, then the fence packet (C3).
 
+## Stage C2a result (2026-11-18, patch 0149, log logs/gpu5.txt): THE GPU CORE ANSWERS
+SPTPRAC power-on through GMU_GX_SPTPRAC_POWER_CONTROL = 0x778000: status 0x28 (bit 3 on). GPU core registers read:
+rbbm_status 0x1, int_0_status 0, vbif_gx_reset_status 0, cp_rb_base 0; a write/readback of cp_rb_base (0x800) returned the
+written value. Next (C2b): kernel pool (kmem_alloc_contig), SMMU context banks for GMU and GPU (SMR/CB counts from IDR0/IDR1:
+5 and 5, not the 6 and 5 the Pixel 4 code assumes), GPU page tables, a615 hw_init register list from kgsl a6xx_start(), SQE
+microcode, zap shader, ring + ME_INIT.
+
 ## Reference work to reuse
 `third_party/ios-flame` (Pixel 4, Adreno 640) already has the whole stack; see its `METAL-NEXT.md`:
 kernel A6xx bring-up (`bsd/dev/sweet_a6xx.c`, patches 0095..0122 in xnu/patches), `SweetAccelerator` (IOAcceleratorES +
