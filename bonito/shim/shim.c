@@ -358,6 +358,29 @@ void shim_main(uintptr_t dtb)
 	}
 	sde_autorefresh(1);
 	STEP();
+#ifdef COLORBARS
+	{
+		/* Colour order test (build with SHIM_CFLAGS=-DCOLORBARS): six full-height bars, left to right
+		 * red, green, blue, white, black, yellow, drawn from a8r8g8b8 words (the order iOS's BGRA surfaces
+		 * and the console use). Held for COLORBARS seconds, then the usual reset to the bootloader. */
+		static const uint32_t bars[6] = { 0xffff0000u, 0xff00ff00u, 0xff0000ffu, 0xffffffffu, 0xff000000u, 0xffffff00u };
+		volatile uint32_t *p = (volatile uint32_t *)fb;
+		uint32_t words = stride / 4;
+		for (uint32_t y = 0; y < FB_H; y++)
+			for (uint32_t x = 0; x < FB_W; x++)
+				p[(uint64_t)y * words + x] = bars[x / (FB_W / 6)];
+		__asm__ volatile("dsb sy" ::: "memory");
+		sde_autorefresh(1);
+		uint64_t until = ticks_now() + 19200000ULL * COLORBARS;
+		while (ticks_now() < until)
+			sde_autorefresh(1);
+		set_reboot_bootloader();
+		for (;;) {
+			smc_call(PSCI_SYSTEM_RESET, 0, 0, 0);
+			__asm__ volatile("wfe");
+		}
+	}
+#endif
 	/* An XNU payload (tools/mkpayload.py) in the ramdisk means: boot it instead of probing. */
 	if (loader_has_payload(dtb)) {
 		struct loader_fb lfb = { fb, stride, FB_W, FB_H, 0 };
