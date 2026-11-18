@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -700,7 +700,812 @@
+@@ -700,7 +700,832 @@
  		thread_deallocate(thread);
  	}
  }
@@ -658,26 +658,46 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	}
 +	bool f01 = false, f12 = false;
 +	uint8_t f12q = 0, f12c = 0, f12d = 0;
-+	for (unsigned pdt = 0xe9; pdt >= 0xd0 && !bt.dead; pdt -= 6) {
-+		uint8_t d[6];
-+		if (bt_rmi_read((uint8_t)pdt, d, 6)) {
-+			break;
++	for (unsigned attempt = 0; attempt < 8 && !f01 && !bt.dead; attempt++) {
++		if (attempt) {
++			bt_wait(500);
 +		}
-+		if (d[5] == 0 || d[5] == 0xff) {
-+			break;
++		(void)bt_rmi_write(0xff, 0);
++		for (unsigned pdt = 0xe9; pdt >= 0xd0 && !bt.dead; pdt -= 6) {
++			uint8_t d[6] = { 0 };
++			int e = bt_rmi_read((uint8_t)pdt, d, 6);
++			if (pdt == 0xe9) {
++				printf("SWEET BTOUCH: try %u: pdt@e9 err %d: %02x %02x %02x %02x %02x %02x (irq pin %d)\n", attempt, e,
++				    d[0], d[1], d[2], d[3], d[4], d[5], bt_pin(bt.north, BT_PIN_IRQ));
++			}
++			if (e || d[5] == 0 || d[5] == 0xff) {
++				break;
++			}
++			printf("SWEET BTOUCH: F%02x at pdt %#x: query %#x cmd %#x ctrl %#x data %#x intr %#x\n", d[5], pdt,
++			    d[0], d[1], d[2], d[3], d[4]);
++			if (d[5] == 0x01) {
++				f01 = true;
++				bt.f01_ctrl = d[2];
++				bt.f01_data = d[3];
++			} else if (d[5] == 0x12) {
++				f12 = true;
++				f12q = d[0];
++				f12c = d[2];
++				f12d = d[3];
++			}
 +		}
-+		printf("SWEET BTOUCH: F%02x at pdt %#x: query %#x cmd %#x ctrl %#x data %#x intr %#x\n", d[5], pdt, d[0],
-+		    d[1], d[2], d[3], d[4]);
-+		if (d[5] == 0x01) {
-+			f01 = true;
-+			bt.f01_ctrl = d[2];
-+			bt.f01_data = d[3];
-+		} else if (d[5] == 0x12) {
-+			f12 = true;
-+			f12q = d[0];
-+			f12c = d[2];
-+			f12d = d[3];
++	}
++	if (!f01) {
++		/* Diagnostics: other pages and raw bytes around the table. */
++		for (unsigned page = 0; page < 3; page++) {
++			uint8_t raw[16] = { 0 };
++			(void)bt_rmi_write(0xff, (uint8_t)page);
++			int e = bt_rmi_read(0xe0, raw, 16);
++			printf("SWEET BTOUCH: page %u e0..ef err %d: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
++			    page, e, raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], raw[8], raw[9], raw[10],
++			    raw[11], raw[12], raw[13], raw[14], raw[15]);
 +		}
++		(void)bt_rmi_write(0xff, 0);
 +	}
 +	if (!f01 || !f12) {
 +		printf("SWEET BTOUCH: need F01 and F12 on page 0 (f01=%d f12=%d); stopping\n", f01, f12);
