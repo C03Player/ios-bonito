@@ -12,7 +12,7 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/bonito_gpu.c
-@@ -0,0 +1,1129 @@
+@@ -0,0 +1,1334 @@
 +/*
 + * bonito GPU bring-up probe, stage A (boot-arg sweetgpu=1; sweetgpudelay=SECS before it starts, default 60).
 + *
@@ -53,6 +53,9 @@ new file mode 100644
 +#include <machine/machine_routines.h>
 +#include <pexpert/pexpert.h>
 +#include <pexpert/device_tree.h>
++#include <kern/locks.h>
++#include <kern/clock.h>
++#include <mach/mach_time.h>
 +#include <vm/pmap.h>
 +#include <vm/vm_kern.h>
 +#include <arm/caches_internal.h>
@@ -101,6 +104,7 @@ new file mode 100644
 +
 +static int g6_chan, g6_stage;
 +static bool g6_booted;
++static volatile bool g6_ready;
 +
 +/*
 + * Registers are mapped one 4 KiB page at a time, on first use: the kernel's I/O mapping space is small (a 512 KiB
@@ -455,6 +459,7 @@ new file mode 100644
 +static void g6_stage_c2a(void);
 +static void g6_stage_c2b(void);
 +static void g6_stage_c4(void);
++static void g6_selftest(void);
 +
 +static void
 +g6_stage_c1(void)
@@ -727,9 +732,12 @@ new file mode 100644
 +		}
 +	}
 +	bool ok = i < timeout_ms * 10;
-+	printf("SWEET GPU615: ring %s: rptr %#x wptr %#x rbbm_status %#x int %#x hw_fault %#x cp_status_1 %#x %s\n", what,
-+	    g6_rd(G6_GMU(G6_CP_RB_RPTR)), g6_wptr, g6_rd(G6_GMU(G6_RBBM_STATUS)), g6_rd(G6_GMU(G6_RBBM_INT_STATUS)),
-+	    g6_rd(G6_GMU(G6_CP_HW_FAULT)), g6_rd(G6_GMU(G6_CP_STATUS_1)), ok ? "idle" : "TIMEOUT");
++	if (what || !ok) {
++		printf("SWEET GPU615: ring %s: rptr %#x wptr %#x rbbm_status %#x int %#x hw_fault %#x cp_status_1 %#x %s\n",
++		    what ? what : "(work)", g6_rd(G6_GMU(G6_CP_RB_RPTR)), g6_wptr, g6_rd(G6_GMU(G6_RBBM_STATUS)),
++		    g6_rd(G6_GMU(G6_RBBM_INT_STATUS)), g6_rd(G6_GMU(G6_CP_HW_FAULT)), g6_rd(G6_GMU(G6_CP_STATUS_1)),
++		    ok ? "idle" : "TIMEOUT");
++	}
 +	return ok ? 0 : -1;
 +}
 +
@@ -904,6 +912,10 @@ new file mode 100644
 +	if (got == marker && g6_stage >= 5) {
 +		g6_stage_c4();
 +	}
++	if (got == marker && g6_stage >= 6) {
++		g6_ready = true;
++		g6_selftest();
++	}
 +}
 +
 +/* ---- stage C4: GPU page-table mappings beyond the pool, and work submitted by indirect buffer ---- */
@@ -1032,6 +1044,196 @@ new file mode 100644
 +	    ok ? "landed" : "MISSING", a, b, (ok && a == 0xc0ffee11u && b == 0xc0ffee22u) ? "IB AND MAPPING WORK" : "FAILED");
 +}
 +
++/* ---- persistent service layer (stage 6) ---- */
++
++#define G6_GVA_USER     0x200000000ull          /* 8 GiB: GPU VAs handed out by bonito_gpu_va_alloc */
++
++static LCK_GRP_DECLARE(g6_grp, "bonito_gpu");
++static LCK_MTX_DECLARE(g6_lock, &g6_grp);
++static uint64_t g6_va_next = G6_GVA_USER;
++static uint64_t g6_fault_count, g6_submit_count;
++
++bool bonito_gpu_ready(void);
++uint64_t bonito_gpu_va_alloc(uint64_t size);
++int bonito_gpu_map_pages(uint64_t iova, const uint64_t *pages, uint32_t npages, uint32_t page_size);
++void bonito_gpu_unmap(uint64_t iova, uint64_t size);
++int bonito_gpu_submit(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms);
++
++bool
++bonito_gpu_ready(void)
++{
++	return g6_ready;
++}
++
++/* GPU virtual addresses are never reused (as on the Pixel 4: freed buffers leak their VA, the 39-bit space is huge). */
++uint64_t
++bonito_gpu_va_alloc(uint64_t size)
++{
++	uint64_t va;
++	lck_mtx_lock(&g6_lock);
++	va = g6_va_next;
++	g6_va_next += (size + 0xfffull) & ~0xfffull;
++	lck_mtx_unlock(&g6_lock);
++	return va;
++}
++
++/* Clear a pending SMMU translation fault so the GPU can go on. Caller holds the lock. Returns true if there was one. */
++static bool
++g6_clear_fault(void)
++{
++	vm_offset_t c0 = G6_SMMU_CB((uint32_t)g6_gpu_cb);
++	uint32_t fsr = g6_rd(c0 + G6_CB_FSR);
++	if (!(fsr & 0xc00001feu)) {
++		return false;
++	}
++	g6_fault_count++;
++	printf("SWEET GPU615: clearing smmu cb%d fault: fsr %#x far %#x%08x fsynr0 %#x\n", g6_gpu_cb, fsr,
++	    g6_rd(c0 + G6_CB_FAR + 4), g6_rd(c0 + G6_CB_FAR), g6_rd(c0 + G6_CB_FSYNR0));
++	g6_wr(c0 + G6_CB_FSR, fsr);
++	return true;
++}
++
++/* Pages (each page_size bytes: 4 KiB or a multiple) at iova, as 4 KiB GPU pages. 0 on success. */
++int
++bonito_gpu_map_pages(uint64_t iova, const uint64_t *pages, uint32_t npages, uint32_t page_size)
++{
++	int rc = 0;
++	uint32_t per = page_size >= 0x1000 ? page_size / 0x1000 : 1, i, k;
++
++	if (!g6_ready || page_size < 0x1000) {
++		return -1;
++	}
++	lck_mtx_lock(&g6_lock);
++	for (i = 0; i < npages && !rc; i++) {
++		for (k = 0; k < per; k++) {
++			uint64_t va = iova + 0x1000ull * ((uint64_t)i * per + k);
++			uint64_t l2 = g6_pt_walk(G6_OFF_GT_L1, (unsigned)((va >> 30) & 0x1ff));
++			uint64_t l3 = l2 ? g6_pt_walk(l2, (unsigned)((va >> 21) & 0x1ff)) : 0;
++			if (!l3) {
++				printf("SWEET GPU615: map_pages: out of page tables at %#llx\n", (unsigned long long)va);
++				rc = -1;
++				break;
++			}
++			g6_pw64(l3 + 8ull * ((va >> 12) & 0x1ff),
++			    (pages[i] + 0x1000ull * k) | (1u << 10) | (3u << 8) | (1u << 6) | 3u);
++		}
++	}
++	g6_tlb_flush();
++	lck_mtx_unlock(&g6_lock);
++	return rc;
++}
++
++void
++bonito_gpu_unmap(uint64_t iova, uint64_t size)
++{
++	if (!g6_ready) {
++		return;
++	}
++	lck_mtx_lock(&g6_lock);
++	for (uint64_t o = 0; o < size; o += 0x1000) {
++		uint64_t va = iova + o;
++		uint64_t l2 = g6_pt_walk(G6_OFF_GT_L1, (unsigned)((va >> 30) & 0x1ff));
++		uint64_t l3 = l2 ? g6_pt_walk(l2, (unsigned)((va >> 21) & 0x1ff)) : 0;
++		if (l3) {
++			g6_pw64(l3 + 8ull * ((va >> 12) & 0x1ff), 0);
++		}
++	}
++	g6_tlb_flush();
++	lck_mtx_unlock(&g6_lock);
++}
++
++/* An indirect buffer, WAIT_FOR_IDLE and a fence write; 0 when the fence landed within timeout_ms. A fault is cleared. */
++int
++bonito_gpu_submit(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms)
++{
++	uint64_t fva = G6_GVA_POOL + G6_OFF_SCRATCH + 0x10;
++	uint32_t fence, got = 0;
++	int rc;
++
++	if (!g6_ready) {
++		return -1;
++	}
++	lck_mtx_lock(&g6_lock);
++	fence = ++g6_fence;
++	g6_submit_count++;
++	uint32_t dw[] = {
++		g6_pkt7(0x3f, 3), (uint32_t)ib_iova, (uint32_t)(ib_iova >> 32), dwords,
++		g6_pkt7(G6_CP_WAIT_FOR_IDLE, 0),
++		g6_pkt7(G6_CP_MEM_WRITE, 3), (uint32_t)fva, (uint32_t)(fva >> 32), fence,
++	};
++	rc = g6_ring(dw, sizeof(dw) / 4, NULL, timeout_ms);
++	g6_pread(G6_OFF_SCRATCH + 0x10, &got, 4);
++	if (rc || got != fence) {
++		rc = -1;
++		(void)g6_clear_fault();
++	}
++	lck_mtx_unlock(&g6_lock);
++	return rc;
++}
++
++/* Boot-time self test of the service: page-list mapping with 16 KiB pages, many submits with timing, unmap and recovery. */
++static void
++g6_selftest(void)
++{
++	uint64_t pages[G6_TESTBUF_SIZE / 0x4000], va2, t0, t1, ns;
++	uint32_t ib[4], bad = 0, i, n = G6_TESTBUF_SIZE / 0x4000;
++	const uint32_t iters = 2000;
++
++	if (!g6_buf_kva) {
++		return;
++	}
++	for (i = 0; i < n; i++) {
++		pages[i] = g6_buf_pa + 0x4000ull * i;
++	}
++	va2 = bonito_gpu_va_alloc(G6_TESTBUF_SIZE);
++	if (bonito_gpu_map_pages(va2, pages, n, 0x4000)) {
++		printf("SWEET GPU615: selftest: map_pages failed\n");
++		return;
++	}
++	printf("SWEET GPU615: selftest: %u x 16 KiB pages mapped at GPU VA %#llx; %u submits follow\n", n,
++	    (unsigned long long)va2, iters);
++	ib[0] = g6_pkt7(G6_CP_MEM_WRITE, 3);
++	ib[1] = (uint32_t)va2;
++	ib[2] = (uint32_t)(va2 >> 32);
++	t0 = mach_absolute_time();
++	for (i = 0; i < iters; i++) {
++		ib[3] = 0x5e1f0000u + i;
++		g6_pwrite(G6_OFF_TEST_IB, ib, sizeof(ib));
++		if (bonito_gpu_submit(G6_GVA_POOL + G6_OFF_TEST_IB, 4, 200)) {
++			bad++;
++			continue;
++		}
++		flush_dcache64((addr64_t)g6_buf_pa, 64, TRUE);
++		if (*(volatile uint32_t *)g6_buf_kva != 0x5e1f0000u + i) {
++			bad++;
++		}
++	}
++	t1 = mach_absolute_time();
++	absolutetime_to_nanoseconds(t1 - t0, &ns);
++	printf("SWEET GPU615: selftest: %u submits, %u bad, %llu us each on average (submit + verify)\n", iters, bad,
++	    (unsigned long long)(ns / 1000 / iters));
++	if (g6_stage >= 7) {
++		/* Recovery: unmap the buffer, let the GPU write to it (translation fault), clear the fault, then work again. */
++		uint32_t ok_after;
++		bonito_gpu_unmap(va2, G6_TESTBUF_SIZE);
++		ib[3] = 0xdeadf00du;
++		g6_pwrite(G6_OFF_TEST_IB, ib, sizeof(ib));
++		printf("SWEET GPU615: selftest: GPU write to an unmapped address (expect a fault and a clean recovery)\n");
++		g6_settle_slow();
++		int rc = bonito_gpu_submit(G6_GVA_POOL + G6_OFF_TEST_IB, 4, 300);
++		ib[1] = (uint32_t)G6_GVA_TESTBUF;
++		ib[2] = (uint32_t)(G6_GVA_TESTBUF >> 32);
++		ib[3] = 0x600dc0deu;
++		g6_pwrite(G6_OFF_TEST_IB, ib, sizeof(ib));
++		ok_after = bonito_gpu_submit(G6_GVA_POOL + G6_OFF_TEST_IB, 4, 300) == 0;
++		flush_dcache64((addr64_t)g6_buf_pa, 64, TRUE);
++		printf("SWEET GPU615: selftest: faulting submit rc %d; faults cleared %llu; later good submit %s (buffer %#x)\n", rc,
++		    (unsigned long long)g6_fault_count, ok_after ? "ok" : "FAILED", *(volatile uint32_t *)g6_buf_kva);
++	}
++	printf("SWEET GPU615: selftest done: %llu submits, %llu faults\n", (unsigned long long)g6_submit_count,
++	    (unsigned long long)g6_fault_count);
++}
++
 +static void
 +g6_thread(__unused void *arg, __unused wait_result_t wr)
 +{
@@ -1124,6 +1326,9 @@ new file mode 100644
 +		return;
 +	}
 +	g6_stage = enabled;
++	if (enabled >= 6) {
++		g6_fast = 1;
++	}
 +	PE_parse_boot_argn("sweetgpufast", &g6_fast, sizeof(g6_fast));
 +	if (enabled >= 4) {
 +		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
