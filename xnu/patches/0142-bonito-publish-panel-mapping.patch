@@ -1,0 +1,16 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -200,7 +200,11 @@
+ 	PE_parse_boot_argn("sweetgpu", &gpu, sizeof(gpu));
+ 	uint32_t mapRowBytes = gpu && fRowBytes < SWEET_FB_GPU_ROWBYTES ? SWEET_FB_GPU_ROWBYTES : fRowBytes;
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, mapRowBytes, SWEET_FB_FORMAT_BGRA);
+-	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
++	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
++	{
++		extern uintptr_t sweet_fb_pixels_va;       /* bsd/dev/sweet_ufs.c: framebuffer snapshots (sweetshot=SECS) read the panel through this */
++		sweet_fb_pixels_va = fPixels;
++	}
+ 	fWorkLoop = IOWorkLoop::workLoop();
+ 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
+ 		IOLog("SWEET FB: setup failed\n");

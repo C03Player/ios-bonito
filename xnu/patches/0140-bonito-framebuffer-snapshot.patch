@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -700,6 +700,105 @@
+@@ -700,6 +700,98 @@
  	}
  }
  
@@ -23,6 +23,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +};
 +
 +static uint32_t sweet_shot_period;
++uintptr_t sweet_fb_pixels_va;       /* set by AppleCLCD::start (iokit/Kernel/arm/SweetFramebuffer.cpp) */
 +
 +static void
 +sweet_shot_thread(__unused void *arg, __unused wait_result_t wr)
@@ -31,8 +32,6 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	uint64_t logbase = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
 +	uint64_t seq = 0;
 +	void *bounce = (void *)(su.dma + DMA_BOUNCE);
-+	vm_offset_t fbva = 0;           /* v_baseAddr is the panel's PHYSICAL address here: map it ourselves */
-+	uint64_t fbphys = 0, fbbytes = 0;
 +
 +	printf("SWEET SHOT: framebuffer snapshot every %u s into two slots below the log (block 0x%llx)\n",
 +	    sweet_shot_period, logbase - 8 - 2 * (uint64_t)SWEET_SHOT_BLOCKS);
@@ -46,15 +45,9 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		if (bytes == 0 || bytes > SWEET_SHOT_MAX_BYTES) {
 +			continue;
 +		}
-+		if (fbva == 0 || fbphys != (uint64_t)v.v_baseAddr || fbbytes != bytes) {
-+			extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
-+			fbva = ml_io_map_wcomb((vm_offset_t)v.v_baseAddr, (vm_size_t)round_page(bytes));
-+			fbphys = (uint64_t)v.v_baseAddr;
-+			fbbytes = bytes;
-+			if (fbva == 0) {
-+				printf("SWEET SHOT: cannot map the panel memory\n");
-+				return;
-+			}
++		uintptr_t fbva = sweet_fb_pixels_va;    /* the display driver's own kernel mapping of the panel memory */
++		if (fbva == 0) {
++			continue;
 +		}
 +		uint64_t slot = logbase - 8 - (1 + (seq & 1)) * (uint64_t)SWEET_SHOT_BLOCKS;
 +		int error = 0;
