@@ -1021,7 +1021,7 @@ new file mode 100644
 +	ib[6] = (uint32_t)((bva + 0x1000) >> 32);
 +	ib[7] = 0xc0ffee22u;
 +	g6_pwrite(G6_OFF_TEST_IB, ib, sizeof(ib));
-+	printf("SWEET GPU615: C4: submitting the IB (indirect buffer at GPU VA %#llx, %zu dwords)\n",
++	printf("SWEET GPU615: C4: submitting the IB (indirect buffer at GPU VA %#llx, %u dwords)\n",
 +	    (unsigned long long)(G6_GVA_POOL + G6_OFF_TEST_IB), (unsigned)(sizeof(ib) / 4));
 +	g6_settle_slow();
 +	bool ok = g6_submit_ib(G6_GVA_POOL + G6_OFF_TEST_IB, sizeof(ib) / 4, "ib");
