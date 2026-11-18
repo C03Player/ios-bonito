@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -700,7 +700,832 @@
+@@ -700,7 +700,851 @@
  		thread_deallocate(thread);
  	}
  }
@@ -69,6 +69,8 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	uint8_t f01_ctrl, f01_data, f12_query, f12_ctrl, f12_data;
 +	unsigned f12_off1, f12_off15, f12_n;
 +	bool f12_has15, configured, bb;
++	uint32_t spmi_status;
++	bool bus_stuck;
 +	unsigned max_x, max_y;
 +	unsigned reports;
 +} bt;
@@ -341,6 +343,10 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	}
 +	delay(100);
 +	printf("SWEET BTOUCH: bit-bang pins: sda %d scl %d\n", bt_pin(bt.north, BT_PIN_SDA), bt_pin(bt.north, BT_PIN_SCL));
++	if (!bt_pin(bt.north, BT_PIN_SDA) || !bt_pin(bt.north, BT_PIN_SCL)) {
++		bt.bus_stuck = true;
++		printf("SWEET BTOUCH: an I2C line is held low (touch IC unpowered or hung); an ACK now would be meaningless\n");
++	}
 +}
 +
 +static void
@@ -466,13 +472,17 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +{
 +	bt_wr(ch, 0x10, val);
 +	bt_wr(ch, 0x00, (0u << 27) | ((addr & 0xffu) << 4));
-+	for (unsigned i = 0; i < 1000; i++) {
++	for (unsigned i = 0; i < 20000; i++) {
 +		uint32_t st = bt_rd(ch, 0x08);
 +		if (st & 1u) {
++			if (st & 0x0eu) {
++				bt.spmi_status = st;
++			}
 +			return !(st & 0x0eu);
 +		}
 +		delay(1);
 +	}
++	bt.spmi_status = 0xffffffffu;
 +	return false;
 +}
 +
@@ -520,17 +530,26 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		printf("SWEET BTOUCH: PM660 GPIO%u write channel mapping failed\n", n);
 +		return;
 +	}
-+	bool ok = bt_spmi_write(ch, 0x41, 0x00) &&      /* power source 0 */
-+	    bt_spmi_write(ch, 0x42, 0x04) &&            /* no pull */
-+	    bt_spmi_write(ch, 0x45, 0x02) &&            /* CMOS, drive strength 2 */
-+	    bt_spmi_write(ch, 0x40, 0x01) &&            /* digital output */
-+	    bt_spmi_write(ch, 0x44, 0x80) &&            /* output value 1 */
-+	    bt_spmi_write(ch, 0x46, 0x80);              /* enable */
-+	(void)bk_read(apid, base | 0x40, &mode);
-+	(void)bk_read(apid, base | 0x44, &out);
-+	(void)bk_read(apid, base | 0x46, &en);
-+	printf("SWEET BTOUCH: PM660 GPIO%u write %s, now mode %#x out-src %#x en %#x\n", n, ok ? "ok" : "FAILED", mode,
-+	    out, en);
++	bool ok = false;
++	unsigned tries = 0;
++	for (; tries < 10 && !ok; tries++) {
++		bt.spmi_status = 0;
++		bool w = bt_spmi_write(ch, base | 0x41, 0x00) &&      /* power source 0 */
++		    bt_spmi_write(ch, base | 0x42, 0x04) &&           /* no pull */
++		    bt_spmi_write(ch, base | 0x45, 0x02) &&           /* CMOS, drive strength 2 */
++		    bt_spmi_write(ch, base | 0x40, 0x01) &&           /* digital output */
++		    bt_spmi_write(ch, base | 0x44, 0x80) &&           /* output value 1 */
++		    bt_spmi_write(ch, base | 0x46, 0x80);             /* enable */
++		ok = bk_read(apid, base | 0x40, &mode) && bk_read(apid, base | 0x44, &out) &&
++		    bk_read(apid, base | 0x46, &en) && (mode & 3u) == 1u && out == 0x80u && en == 0x80u;
++		if (!ok) {
++			printf("SWEET BTOUCH: PM660 GPIO%u try %u: writes %s (arb status %#x), readback mode %#x out %#x en %#x\n",
++			    n, tries, w ? "ok" : "failed", bt.spmi_status, mode, out, en);
++			bt_wait(10);
++		}
++	}
++	printf("SWEET BTOUCH: PM660 GPIO%u %s after %u tries, now mode %#x out-src %#x en %#x\n", n,
++	    ok ? "is a high output" : "COULD NOT BE ENABLED", tries, mode, out, en);
 +}
 +
 +static void
@@ -641,7 +660,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		bt.bb = true;
 +		bt.dead = false;
 +		bb_setup();
-+		err = bt_rmi_write(0xff, 0);
++		err = bt.bus_stuck ? ENXIO : bt_rmi_write(0xff, 0);
 +		if (err) {
 +			printf("SWEET BTOUCH: bit-banged I2C: no answer from %#x either (err %d); scanning\n", BT_ADDR, err);
 +			for (unsigned a = 0x08; a < 0x78; a++) {
