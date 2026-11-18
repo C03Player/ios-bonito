@@ -12,7 +12,7 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/bonito_gpu.c
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,548 @@
 +/*
 + * bonito GPU bring-up probe, stage A (boot-arg sweetgpu=1; sweetgpudelay=SECS before it starts, default 60).
 + *
@@ -31,6 +31,11 @@ new file mode 100644
 + * tools/mkpayload.py --gpufw) into the GMU ITCM, boot registers, power configuration, CM3 reset release, then a poll for
 + * FW_INIT_RESULT == 0xBABEFACE. No HFI, no GX rail, no GPU access yet.
 + *
++ * Stage C1 (sweetgpu=3) then asks the GMU for the GX rail the way kgsl does with the DT quirk gpu-quirk-hfi-use-reg
++ * (a6xx_gfx_rail_on): vote indices into the RPMh command database's "gfx.lvl" and "mx.lvl" tables go into
++ * BOOT_SLUMBER_OPTION/GX_VOTE_IDX/MX_VOTE_IDX, then OOB bit 22 is set and bit 30 of GMU2HOST_INTR_INFO is the ack. Success is
++ * the GPU CC's GX GDSC reporting power on. The tables are logged: the real ARC levels are not in the DT.
++ *
 + * A bus access to an unclocked block hangs the SoC. Every step therefore prints what it is about to do and then sleeps
 + * long enough for the persistent console log (flushed every ufslogsecs) to hold that line before the risky access.
 + */
@@ -42,9 +47,12 @@ new file mode 100644
 +#include <machine/machine_routines.h>
 +#include <pexpert/pexpert.h>
 +#include <pexpert/device_tree.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +extern int hz;
++extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 +void sweet_gpu615_start(void);
 +
 +#define G6_GCC_PA       0x00100000u
@@ -82,19 +90,21 @@ new file mode 100644
 +#define G6_RPMH_ENABLE  (1u | (1u << 4) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11))
 +
 +static int g6_chan, g6_stage;
++static bool g6_booted;
 +
 +/*
 + * Registers are mapped one 4 KiB page at a time, on first use: the kernel's I/O mapping space is small (a 512 KiB
 + * mapping already failed with KERN_NO_SPACE once the touch driver had taken its share).
 + */
-+#define G6_PAGES 32
++#define G6_PAGES 64
 +static struct {
 +	vm_offset_t pa, va;
 +} g6_pg[G6_PAGES];
 +static unsigned g6_npg;
 +
++/* dram: the page is ordinary (reserved) RAM such as the RPMh command database, mapped as device memory for reading. */
 +static volatile uint32_t *
-+g6_reg(vm_offset_t pa)
++g6_reg_ex(vm_offset_t pa, bool dram)
 +{
 +	vm_offset_t page = pa & ~(vm_offset_t)0xfff;
 +	for (unsigned i = 0; i < g6_npg; i++) {
@@ -105,7 +115,7 @@ new file mode 100644
 +	if (g6_npg == G6_PAGES) {
 +		return NULL;
 +	}
-+	vm_offset_t va = ml_io_map(page, 0x1000);
++	vm_offset_t va = dram ? ml_io_map_unmappable(page, 0x1000, VM_WIMG_IO) : ml_io_map(page, 0x1000);
 +	if (!va) {
 +		return NULL;
 +	}
@@ -113,6 +123,25 @@ new file mode 100644
 +	g6_pg[g6_npg].va = va;
 +	g6_npg++;
 +	return (volatile uint32_t *)(va + (pa & 0xfff));
++}
++
++static volatile uint32_t *
++g6_reg(vm_offset_t pa)
++{
++	return g6_reg_ex(pa, false);
++}
++
++static uint32_t
++g6_dram_rd(vm_offset_t pa)
++{
++	volatile uint32_t *r = g6_reg_ex(pa, true);
++	if (!r) {
++		printf("SWEET GPU615: cannot map RAM %#lx\n", (unsigned long)pa);
++		return 0xdeadbeefu;
++	}
++	uint32_t v = *r;
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
 +}
 +
 +static uint32_t
@@ -307,9 +336,132 @@ new file mode 100644
 +	printf("SWEET GPU615: GMU %s: init_result %#x after %u ms; general_7 %#x rpmh_state %#x cx_busy %#x\n",
 +	    booted ? "BOOTED" : "did not boot", res, ms, g6_rd(G6_GMU(G6_GMU_GENERAL7)), g6_rd(G6_GMU(G6_GMU_RPMH_ST)),
 +	    g6_rd(G6_GMU(G6_GMU_CX_BUSY)));
++	g6_booted = booted;
 +	g6_settle();
 +	printf("SWEET GPU615: after settle: init_result %#x rpmh_state %#x gmu2host_intr_info %#x\n",
 +	    g6_rd(G6_GMU(0x1f81c)), g6_rd(G6_GMU(G6_GMU_RPMH_ST)), g6_rd(G6_GMU(0x1f992)));
++}
++
++/* ---- stage C1: RPMh command database levels, GX rail through the OOB handshake ---- */
++
++static bool
++g6_cmddb_aux(const char *id, vm_offset_t *aux, uint32_t *len)
++{
++	vm_offset_t db = g6_rd(0x0c3f000cu);    /* this register holds the physical address of the command database */
++	if (g6_dram_rd(db + 4) != 0x0c0330dbu) {
++		printf("SWEET GPU615: cmd-db at %#lx has no magic (%#x)\n", (unsigned long)db, g6_dram_rd(db + 4));
++		return false;
++	}
++	vm_offset_t data = db + 4 + 4 + 8 * 16 + 4 + 4;
++	for (uint32_t r = 0; r < 8; r++) {
++		vm_offset_t rh = db + 8 + 16 * r;
++		uint32_t w0 = g6_dram_rd(rh), w1 = g6_dram_rd(rh + 4);
++		uint32_t hoff = w0 >> 16, doff = w1 & 0xffffu, cnt = w1 >> 16;
++		for (uint32_t e = 0; e < cnt; e++) {
++			vm_offset_t ent = data + hoff + 24 * e;
++			char name[9];
++			for (uint32_t i = 0; i < 8; i++) {
++				name[i] = (char)(g6_dram_rd(ent + (i & ~3u)) >> (8 * (i & 3)));
++			}
++			name[8] = 0;
++			if (strncmp(name, id, 8) != 0) {
++				continue;
++			}
++			uint32_t w5 = g6_dram_rd(ent + 20);
++			*len = w5 & 0xffffu;
++			*aux = data + doff + (w5 >> 16);
++			return true;
++		}
++	}
++	return false;
++}
++
++static uint32_t
++g6_aux16(vm_offset_t aux, uint32_t i)
++{
++	return (g6_dram_rd(aux + 2 * (i & ~1u)) >> (16 * (i & 1))) & 0xffffu;
++}
++
++static void
++g6_log_levels(const char *id)
++{
++	vm_offset_t aux;
++	uint32_t len;
++	if (!g6_cmddb_aux(id, &aux, &len)) {
++		printf("SWEET GPU615: cmd-db: no %s\n", id);
++		return;
++	}
++	printf("SWEET GPU615: cmd-db %s (%u bytes):", id, len);
++	for (uint32_t i = 0; i < len / 2 && i < 16; i++) {
++		printf(" %u", g6_aux16(aux, i));
++	}
++	printf("\n");
++}
++
++/* RPMh vote indices for ARC level lvl (kgsl setup_volt_dependency_tbl, as the Pixel 4 code does it). */
++static bool
++g6_arc_idx(const char *pri_id, const char *sec_id, uint32_t lvl, uint32_t *pri_idx, uint32_t *sec_idx, uint32_t *vlvl)
++{
++	vm_offset_t pri, sec;
++	uint32_t plen, slen, j, pindex = 0, sindex = 0;
++
++	if (!g6_cmddb_aux(pri_id, &pri, &plen) || !g6_cmddb_aux(sec_id, &sec, &slen)) {
++		return false;
++	}
++	plen /= 2;
++	slen /= 2;
++	for (j = 0; j < plen; j++) {
++		if (g6_aux16(pri, j) >= lvl) {
++			pindex = j;
++			break;
++		}
++	}
++	if (j == plen) {
++		return false;
++	}
++	for (j = 0; j < slen; j++) {
++		if (g6_aux16(sec, j) >= lvl) {
++			sindex = j;
++			break;
++		} else if (g6_aux16(sec, j)) {
++			sindex = j;
++		}
++	}
++	*pri_idx = pindex;
++	*sec_idx = sindex;
++	*vlvl = g6_aux16(pri, pindex);
++	return true;
++}
++
++static void
++g6_stage_c1(void)
++{
++	uint32_t pri = 0, sec = 0, vlvl = 0;
++	bool acked;
++
++	printf("SWEET GPU615: C1: RPMh command database levels\n");
++	g6_settle();
++	g6_log_levels("gfx.lvl");
++	g6_log_levels("mx.lvl");
++	g6_log_levels("cx.lvl");
++	if (!g6_arc_idx("gfx.lvl", "mx.lvl", 64, &pri, &sec, &vlvl)) {
++		printf("SWEET GPU615: C1: no vote indices for level 64; stopping\n");
++		return;
++	}
++	printf("SWEET GPU615: C1: level 64 (LOW_SVS) -> gx index %u (vlvl %u), mx index %u\n", pri, vlvl, sec);
++	printf("SWEET GPU615: C1: GX gdsc before %#x; requesting the GX rail (OOB)\n", g6_rd(G6_CC_PA + G6_CC_GX_GDSCR));
++	g6_settle();
++	g6_gw(0x1cbf8, 0);                      /* GMU_BOOT_SLUMBER_OPTION = OOB_BOOT_OPTION */
++	g6_gw(0x1cbf9, pri);                    /* GMU_GX_VOTE_IDX */
++	g6_gw(0x1cbfa, sec);                    /* GMU_MX_VOTE_IDX */
++	g6_gw(0x1f994, 1u << 22);               /* HOST2GMU_INTR_SET: OOB_BOOT_SLUMBER_SET_MASK */
++	acked = g6_wait(G6_GMU(0x1f992), 1u << 30, true, 1000);
++	printf("SWEET GPU615: C1: OOB %s, gmu2host_intr_info %#x, gx gdsc %#x rpmh_state %#x\n", acked ? "acked" : "NOT acked",
++	    g6_rd(G6_GMU(0x1f992)), g6_rd(G6_CC_PA + G6_CC_GX_GDSCR), g6_rd(G6_GMU(G6_GMU_RPMH_ST)));
++	g6_gw(0x1f991, 1u << 30);               /* GMU2HOST_INTR_CLR: the ack bit */
++	g6_settle();
++	printf("SWEET GPU615: C1: after settle: gx gdsc %#x (bit 31 = power on), cx_busy %#x, gmu2host_intr_info %#x\n",
++	    g6_rd(G6_CC_PA + G6_CC_GX_GDSCR), g6_rd(G6_GMU(G6_GMU_CX_BUSY)), g6_rd(G6_GMU(0x1f992)));
 +}
 +
 +static void
@@ -383,6 +535,9 @@ new file mode 100644
 +	printf("SWEET GPU615: stage A complete\n");
 +	if (g6_stage >= 2) {
 +		g6_stage_b();
++		if (g6_stage >= 3 && g6_booted) {
++			g6_stage_c1();
++		}
 +		printf("SWEET GPU615: stage B complete\n");
 +	}
 +	for (;;) {
