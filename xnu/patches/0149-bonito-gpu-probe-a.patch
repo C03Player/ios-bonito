@@ -12,7 +12,7 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/bonito_gpu.c
-@@ -0,0 +1,976 @@
+@@ -0,0 +1,980 @@
 +/*
 + * bonito GPU bring-up probe, stage A (boot-arg sweetgpu=1; sweetgpudelay=SECS before it starts, default 60).
 + *
@@ -36,7 +36,7 @@ new file mode 100644
 + * BOOT_SLUMBER_OPTION/GX_VOTE_IDX/MX_VOTE_IDX, then OOB bit 22 is set and bit 30 of GMU2HOST_INTR_INFO is the ack. Success is
 + * the GPU CC's GX GDSC reporting power on. The tables are logged: the real ARC levels are not in the DT.
 + *
-+ * Stage C2b/C3 (sweetgpu=4): a 16 MiB contiguous pool (GPU page tables, SQE microcode, ring, scratch), the GPU's SMMU
++ * Stage C2b/C3 (sweetgpu=4): a 4 MiB contiguous pool (claimed at boot, before memory fragments) (GPU page tables, SQE microcode, ring, scratch), the GPU's SMMU
 + * context bank, the A615 register setup (kgsl a6xx_start() with the DT values: GMEM 512 KiB, highest bank bit 14, UBWC mode
 + * 2), SQE microcode, the zap shader through TrustZone (PAS 13, region 0x95c15000), ring + ME_INIT, then CP_MEM_WRITE of a
 + * marker into the pool and a read-back of it. Structure and most register values follow the Pixel 4 core driver
@@ -514,7 +514,7 @@ new file mode 100644
 +
 +/* ---- stage C2b / C3: pool, SMMU, SQE, zap shader, ring, first command ---- */
 +
-+#define G6_POOL_SIZE    0x1000000ull
++#define G6_POOL_SIZE    0x400000ull    /* 4 MiB: tables, SQE, ring and scratch fit with room to spare */
 +#define G6_POOL_ALIGN   0x200000ull
 +#define G6_OFF_ZAP_META 0x0a0000ull
 +#define G6_OFF_GT_L1    0x100000ull
@@ -588,7 +588,7 @@ new file mode 100644
 +	}
 +	if (kmem_alloc_contig(kernel_map, &va, G6_POOL_SIZE, PAGE_MASK, 0, (ppnum_t)(atop_64(G6_POOL_ALIGN) - 1),
 +	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-+		printf("SWEET GPU615: no contiguous 16 MiB pool\n");
++		printf("SWEET GPU615: no contiguous 4 MiB pool\n");
 +		return false;
 +	}
 +	g6_pool_pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)va));
@@ -817,7 +817,8 @@ new file mode 100644
 +
 +	printf("SWEET GPU615: C2b: pool\n");
 +	g6_settle();
-+	if (!g6_pool_alloc()) {
++	if (!g6_pool_kva) {
++		printf("SWEET GPU615: C2b: no pool (allocation at boot failed)\n");
 +		return;
 +	}
 +	printf("SWEET GPU615: C2b: SMMU context for the GPU\n");
@@ -984,6 +985,9 @@ new file mode 100644
 +		return;
 +	}
 +	g6_stage = enabled;
++	if (enabled >= 4) {
++		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
++	}
 +	if (kernel_thread_start(g6_thread, NULL, &thread) == KERN_SUCCESS) {
 +		thread_deallocate(thread);
 +	}
