@@ -1,7 +1,22 @@
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
 --- a/osfmk/kern/debug.c
 +++ b/osfmk/kern/debug.c
-@@ -1300,7 +1300,14 @@
+@@ -1077,6 +1077,14 @@
+ 	sweet_early_panic(panic_format_str, panic_args);
+ #endif
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		/* Put the panic string into the log ring and on the eMMC right away (the later paths may never complete). */
++		extern void sweet_log_panic_string(const char *fmt, va_list *args);
++		sweet_log_panic_string(panic_format_str, panic_args);
++	}
++#endif
++
+ #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+ 	read_lbr();
+ #endif
+@@ -1308,7 +1308,14 @@
  		 * TODO: Need to clear panic log when return from debugger
  		 * hooked up for embedded
  		 */
@@ -19,23 +34,39 @@ diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -700,6 +700,47 @@
+@@ -700,6 +700,86 @@
  	}
  }
  
 +/*
-+ * Called from the panic path (osfmk/kern/debug.c, after SavePanicInfo) once the panic text and backtrace are on the
-+ * console and therefore in the log ring: write the last 256 KiB of the ring and the header to the eMMC right away.
-+ * The flush thread cannot run any more (the panic stops the other CPUs); the driver is polled, so this works in panic
-+ * context. Skipped if another CPU was in the middle of an eMMC command (the lock is taken). The header's flush
-+ * sequence is set to 0x50414e49 ("PANI") so the reader can tell.
++ * Panic-time log flush (hooks in osfmk/kern/debug.c): write the last 256 KiB of the console ring and its header to the
++ * eMMC from the panic path. The flush thread cannot run any more (a panic stops the other CPUs) but the driver is
++ * polled, so this works there. A panic often hits during file system I/O, i.e. another CPU was in the middle of an
++ * eMMC command and holds the lock: the system is dead anyway, so reset the command/data lines, stop any transfer,
++ * wait for the card and use the controller. The header's flush sequence is 0x50414e49 ("PANI") so a reader can tell.
 + */
 +void sweet_log_panic_flush(void);
 +void
 +sweet_log_panic_flush(void)
 +{
-+	if (!su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS || !lck_mtx_try_lock(&sweet_ufs_lock)) {
++	if (!su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS) {
 +		return;
++	}
++	if (!lck_mtx_try_lock(&sweet_ufs_lock)) {
++		uint32_t r[4] = { 0 };
++		uint64_t deadline;
++		emmc_reset_lines();
++		(void)emmc_cmd(12, 0, CF(R_48B, 1, 1, 0), r);
++		nanoseconds_to_absolutetime(300ull * NSEC_PER_MSEC, &deadline);
++		deadline += mach_absolute_time();
++		for (;;) {
++			if (!emmc_cmd(13, su.rca << 16, CF(R_48, 1, 1, 0), r) && (r[0] & 0x100) && ((r[0] >> 9) & 0xf) == 4) {
++				break;
++			}
++			if (mach_absolute_time() > deadline) {
++				break;
++			}
++		}
 +	}
 +	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
 +	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
@@ -62,6 +93,29 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		memcpy(bounce, &h, sizeof(h));
 +		(void)ufs_write_blocks(base, 1);
 +	}
++}
++
++/* First thing in the panic path: the panic string itself into the ring, then flush. */
++void sweet_log_panic_string(const char *fmt, va_list *args);
++void
++sweet_log_panic_string(const char *fmt, va_list *args)
++{
++	static char buf[400];
++	va_list copy;
++
++	va_copy(copy, *args);
++	int n = vsnprintf(buf, sizeof(buf), fmt, copy);
++	va_end(copy);
++	if (n < 0) {
++		n = 0;
++	}
++	if (n >= (int)sizeof(buf)) {
++		n = (int)sizeof(buf) - 1;
++	}
++	sweet_log_append("\nSWEET PANIC: ", 14);
++	sweet_log_append(buf, n);
++	sweet_log_append("\n", 1);
++	sweet_log_panic_flush();
 +}
 +
  /* Root device for rd=ufsroot0 (IOFindBSDRoot). */
