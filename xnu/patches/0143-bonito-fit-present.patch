@@ -9,7 +9,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  };
  
  OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
-@@ -520,6 +520,142 @@
+@@ -520,6 +520,170 @@
  	return true;
  }
  
@@ -35,12 +35,16 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +{
 +	static int state;               /* 0 not read, 1 off, 2 on */
 +	static bool cleared;
++	static int fill_state;          /* 0 not read, 1 off, 2 on: boot-arg sweetfb_fitfill (default 1) */
 +	static uint32_t xi[1280], xw[1280], rowbuf[1280];
 +
 +	if (state == 0) {
 +		int fit = 1;
 +		PE_parse_boot_argn("sweetfb_fit", &fit, sizeof(fit));
 +		state = fit ? 2 : 1;
++		int fill = 1;
++		PE_parse_boot_argn("sweetfb_fitfill", &fill, sizeof(fill));
++		fill_state = fill ? 2 : 1;
 +	}
 +	if (state != 2 || (fLogicalW == fWidth && fLogicalH == fHeight) || fWidth > 1280) {
 +		return false;
@@ -49,6 +53,12 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +	uint64_t scw = ((uint64_t)fWidth << 16) / fLogicalW, sch = ((uint64_t)fHeight << 16) / fLogicalH;
 +	uint64_t sc = scw < sch ? scw : sch;
 +	uint32_t fitW = (uint32_t)(((uint64_t)fLogicalW * sc) >> 16), fitH = (uint32_t)(((uint64_t)fLogicalH * sc) >> 16);
++	if (fitH + 1 >= fHeight) {      /* rounding must not leave a black line */
++		fitH = fHeight;
++	}
++	if (fitW + 1 >= fWidth) {
++		fitW = fWidth;
++	}
 +	int32_t fitX = (int32_t)(fWidth - fitW) / 2, fitY = (int32_t)(fHeight - fitH) / 2;
 +	uint64_t inv = (1ull << 32) / sc;       /* 1 / scale, 16.16 */
 +
@@ -109,6 +119,13 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +		if (oy0 + oh > (int32_t)fHeight) {
 +			oh = (int32_t)fHeight - oy0;
 +		}
++		bool full = ox0 == fitX && oy0 == fitY && ow + 1 >= (int32_t)fitW && oh + 1 >= (int32_t)fitH;
++		if (full) {
++			ow = (int32_t)fitW;
++			oh = (int32_t)fitH;
++		}
++		/* The full-frame layer also fills the side bars with its edge colour (no black stripes on the wallpaper). */
++		bool fill = full && fitX > 0 && fill_state == 2;
 +		if (ow <= 0 || oh <= 0 || ow > 1280) {
 +			s->release();
 +			continue;
@@ -140,9 +157,20 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +			const uint32_t *p1 = (const uint32_t *)((uintptr_t)p0 + s->bytesPerRow);
 +			for (int32_t x = 0; x < ow; x++) {
 +				uint32_t i = xi[x], wx = xw[x];
-+				rowbuf[x] = sweet_lerp32(sweet_lerp32(p0[i], p0[i + 1], wx), sweet_lerp32(p1[i], p1[i + 1], wx), wy);
++				rowbuf[(fill ? ox0 : 0) + x] = sweet_lerp32(sweet_lerp32(p0[i], p0[i + 1], wx), sweet_lerp32(p1[i], p1[i + 1], wx), wy);
 +			}
-+			copyRow((uint32_t)ox0, (uint32_t)(oy0 + y), rowbuf, (uint32_t)ow);
++			if (fill) {
++				uint32_t lc = rowbuf[ox0], rc = rowbuf[ox0 + ow - 1];
++				for (int32_t x = 0; x < ox0; x++) {
++					rowbuf[x] = lc;
++				}
++				for (uint32_t x = (uint32_t)(ox0 + ow); x < fWidth; x++) {
++					rowbuf[x] = rc;
++				}
++				copyRow(0, (uint32_t)(oy0 + y), rowbuf, fWidth);
++			} else {
++				copyRow((uint32_t)ox0, (uint32_t)(oy0 + y), rowbuf, (uint32_t)ow);
++			}
 +		}
 +		s->release();
 +	}
