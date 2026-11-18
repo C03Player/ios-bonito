@@ -1,0 +1,60 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -700,6 +700,45 @@
+ 	sweet_log_panic_flush();
+ }
+ 
++/*
++ * Keep-awake taps (boot-arg sweetwake=SECS, 1..600; default off): until real touch input is ported iOS's idle timer
++ * puts the screen to sleep ~10-30 s after it wakes and nothing can wake it again. Every SECS seconds a short tap is
++ * injected into the HID touch service at the top centre of the panel (status bar, nothing to hit on the lock screen):
++ * that resets the idle timer, and iOS's tap-to-wake wakes a sleeping screen. Coordinates are panel pixels.
++ */
++static uint32_t sweet_wake_period;
++
++static void
++sweet_wake_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	extern void sweet_hid_touch(int finger, int down, int x, int y);
++	static int chan;
++
++	for (;;) {
++		(void)tsleep(&chan, PZERO, "sweetwake", hz * (int)sweet_wake_period);
++		sweet_hid_touch(0, 1, 540, 4);
++		(void)tsleep(&chan, PZERO, "sweetwake", hz / 10);
++		sweet_hid_touch(0, 0, 540, 4);
++	}
++}
++
++void sweet_wake_start(void);
++void
++sweet_wake_start(void)
++{
++	uint32_t secs = 0;
++	thread_t thread;
++
++	PE_parse_boot_argn("sweetwake", &secs, sizeof(secs));
++	if (secs == 0 || secs > 600) {
++		return;
++	}
++	sweet_wake_period = secs;
++	if (kernel_thread_start(sweet_wake_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++
+ /* Root device for rd=ufsroot0 (IOFindBSDRoot). */
+ int sweet_ufs_rootdev(dev_t *dev);
+ 
+@@ -900,6 +900,10 @@
+ 		extern void sweet_shot_start(void);
+ 		sweet_shot_start();     /* framebuffer snapshots (boot-arg sweetshot=SECS): bsd/dev/sweet_ufs.c */
+ 	}
++	{
++		extern void sweet_wake_start(void);
++		sweet_wake_start();     /* keep-awake taps (boot-arg sweetwake=SECS): bsd/dev/sweet_ufs.c */
++	}
+ 	sweet_usb_probe();      /* boot-arg sweetusb=2 (+ sweetusbdma=<low PA>) starts the USB Ethernet gadget: bsd/dev/sweet_usb.c */
+ 	{
+ 		/* sweetusbhold=N: keep the console quiet for N seconds so the USB messages stay on screen (debug) */
