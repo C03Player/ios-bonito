@@ -1,15 +1,16 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -700,6 +700,45 @@
+@@ -700,6 +700,46 @@
  	sweet_log_panic_flush();
  }
  
 +/*
 + * Keep-awake taps (boot-arg sweetwake=SECS, 1..600; default off): until real touch input is ported iOS's idle timer
 + * puts the screen to sleep ~10-30 s after it wakes and nothing can wake it again. Every SECS seconds a short tap is
-+ * injected into the HID touch service at the top centre of the panel (status bar, nothing to hit on the lock screen):
-+ * that resets the idle timer, and iOS's tap-to-wake wakes a sleeping screen. Coordinates are panel pixels.
++ * injected into the HID touch service in the middle of the panel (nothing to hit on the lock screen; NOT near an edge:
++ * contacts within 48 px of an edge are flagged edge-tip and do not count as normal activity): that resets the idle
++ * timer, and iOS's tap-to-wake wakes a sleeping screen. Coordinates are panel pixels.
 + */
 +static uint32_t sweet_wake_period;
 +
@@ -21,9 +22,9 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +
 +	for (;;) {
 +		(void)tsleep(&chan, PZERO, "sweetwake", hz * (int)sweet_wake_period);
-+		sweet_hid_touch(0, 1, 540, 4);
++		sweet_hid_touch(0, 1, 540, 1000);
 +		(void)tsleep(&chan, PZERO, "sweetwake", hz / 10);
-+		sweet_hid_touch(0, 0, 540, 4);
++		sweet_hid_touch(0, 0, 540, 1000);
 +	}
 +}
 +
