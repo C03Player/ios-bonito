@@ -84,6 +84,20 @@ written value. Next (C2b): kernel pool (kmem_alloc_contig), SMMU context banks f
 5 and 5, not the 6 and 5 the Pixel 4 code assumes), GPU page tables, a615 hw_init register list from kgsl a6xx_start(), SQE
 microcode, zap shader, ring + ME_INIT.
 
+## Stage C2b/C3 result (2026-11-18, patch 0149 with sweetgpu=4, log logs/gpu7.txt): THE GPU RUNS COMMANDS
+Boot-time 4 MiB contiguous pool (a 16 MiB runtime allocation failed on fragmented memory; claim at boot). SMMU: 5 stream groups,
+5 context banks; GPU bank cb0 (T0SZ 25, SID 0). a615 register setup, SQE loaded (a630_sqe.fw minus its first dword), CP started:
+ME_INIT idle (rptr 9). Zap shader through TrustZone PAS 13: init image, mem setup, auth and reset all rc 0. `SET_SECURE_MODE 0`
+idle. CP_MEM_WRITE 0x6a615001 to GPU VA 0x10218000 landed in the pool scratch (read back 0x6a615001). No SMMU fault, hw_fault 0.
+The kernel probe (bsd/dev/bonito_gpu.c, sweetgpu=4) is a bring-up harness: nothing keeps the GPU for iOS yet.
+
+Next, in order: (1) turn the probe into a persistent kernel GPU service: bring-up once at boot, a lock, buffer allocation and
+mapping into the GPU page tables beyond the 4 MiB pool, a submit/fence path with timeouts and fault recovery, power handling;
+(2) publish an IOAccelerator service that Metal can find (see ios-flame patches 0096/0097 for the shape: IOAcceleratorES, user
+client with info/alloc/free/import/submit/wait selectors); (3) the userland Metal device. The Pixel 4 SweetMetal path needs
+pipelines compiled on a Mac, so the plan is the on-device path from its METAL-NEXT.md: Metal frontend -> metal2vulkan (AIR to
+SPIR-V) -> Mesa Turnip built for iOS with a darwin kernel backend -> the kernel user client. That is the large part.
+
 ## Reference work to reuse
 `third_party/ios-flame` (Pixel 4, Adreno 640) already has the whole stack; see its `METAL-NEXT.md`:
 kernel A6xx bring-up (`bsd/dev/sweet_a6xx.c`, patches 0095..0122 in xnu/patches), `SweetAccelerator` (IOAcceleratorES +
