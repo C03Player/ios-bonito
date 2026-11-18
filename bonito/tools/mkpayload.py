@@ -155,7 +155,8 @@ def add_poke_to_adt(adt_blob, script):
     return adt.serialize(root)
 
 
-GPU_FW = ('a640_gmu.bin', 'a630_sqe.fw', 'a640_zap.mdt', 'a640_zap.b02')
+# bonito (Adreno 615): the GMU and SQE images are the A630 ones; the zap shader is a615_zap (mdt + its segment files)
+GPU_FW = ('a630_gmu.bin', 'a630_sqe.fw', 'a615_zap.mdt', 'a615_zap.b00', 'a615_zap.b01', 'a615_zap.b02')
 
 
 def add_gpufw_to_adt(adt_blob, fw_dir):

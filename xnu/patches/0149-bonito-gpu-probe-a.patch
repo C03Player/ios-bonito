@@ -12,7 +12,7 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/bonito_gpu.c
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,393 @@
 +/*
 + * bonito GPU bring-up probe, stage A (boot-arg sweetgpu=1; sweetgpudelay=SECS before it starts, default 60).
 + *
@@ -26,6 +26,11 @@ new file mode 100644
 + * android_kernel_google_msm-4.9 tree (df5cccf); GPU, GMU and SMMU bases from the stock bonito DTB (kgsl-3d0@5000000,
 + * arm,smmu-kgsl@5040000, gpucc@5090000).
 + *
++ * Stage B (sweetgpu=2) continues with the GMU cold boot as kgsl's a6xx_gmu_fw_start() does it for the TCM-boot GMU of the
++ * A630/A615 family: RSC/PDC sequencer microcode, GMU firmware (a630_gmu.bin, from /chosen "gpufw,a630_gmu.bin", see
++ * tools/mkpayload.py --gpufw) into the GMU ITCM, boot registers, power configuration, CM3 reset release, then a poll for
++ * FW_INIT_RESULT == 0xBABEFACE. No HFI, no GX rail, no GPU access yet.
++ *
 + * A bus access to an unclocked block hangs the SoC. Every step therefore prints what it is about to do and then sleeps
 + * long enough for the persistent console log (flushed every ufslogsecs) to hold that line before the risky access.
 + */
@@ -36,6 +41,7 @@ new file mode 100644
 +#include <kern/sched_prim.h>
 +#include <machine/machine_routines.h>
 +#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +extern int hz;
@@ -67,7 +73,15 @@ new file mode 100644
 +#define G6_GMU_GENERAL7 0x1f9ccu
 +#define G6_GMU_CX_BUSY  0x23b0cu
 +
-+static int g6_chan;
++#define G6_PDC_PA       0x0b200000u     /* kgsl_gmu_pdc_reg */
++#define G6_PDC(o)       (G6_PDC_PA + 4u * (o))
++#define G6_STAGE_B_FW   "gpufw,a630_gmu.bin"
++#define G6_FW_WORDS     0x2000u         /* MAX_GMUFW_SIZE words: the whole 32 KiB image */
++#define G6_CHIPID_SFR   0x06015000u     /* 0x06010500 with minor/patch compressed into bits 15-8 */
++#define G6_FENCE_RANGE  ((1u << 31) | ((0xau << 2) << 18) | 0x8a0u)
++#define G6_RPMH_ENABLE  (1u | (1u << 4) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11))
++
++static int g6_chan, g6_stage;
 +
 +/*
 + * Registers are mapped one 4 KiB page at a time, on first use: the kernel's I/O mapping space is small (a 512 KiB
@@ -154,6 +168,150 @@ new file mode 100644
 +	printf("SWEET GPU615: %s [%#lx] = %#x%s\n", name, (unsigned long)pa, g6_rd(pa), ok ? "" : " (still halted)");
 +}
 +
++/* ---- stage B: GMU cold boot ---- */
++
++static void
++g6_gw(uint32_t off, uint32_t v)
++{
++	g6_wr(G6_GMU(off), v);
++}
++
++static void
++g6_pw(uint32_t off, uint32_t v)
++{
++	g6_wr(G6_PDC(off), v);
++}
++
++static void
++g6_rsc_pdc_ucode(void)
++{
++	/* RSC: kgsl _load_gmu_rpmh_ucode() */
++	g6_gw(0x23404, 1u << 24);               /* RSC_STATUS0_DRV0: disable SDE clock gating */
++	g6_gw(0x2340b, 1);                      /* PDC_SLAVE_ID_DRV0 */
++	g6_gw(0x2340e, 0);                      /* HIDDEN_TCS_CMD0_DATA */
++	g6_gw(0x2340d, 0);                      /* HIDDEN_TCS_CMD0_ADDR */
++	g6_gw(0x2340e + 2, 0);
++	g6_gw(0x2340d + 2, 0);
++	g6_gw(0x2340e + 4, 0x80000000u);
++	g6_gw(0x2340d + 4, 0);
++	g6_gw(0x23500, 0);                      /* OVERRIDE_START_ADDR */
++	g6_gw(0x23408, 0x4520);                 /* PDC_SEQ_START_ADDR */
++	g6_gw(0x23409, 0x4510);                 /* PDC_MATCH_VALUE_LO */
++	g6_gw(0x2340a, 0x4514);                 /* PDC_MATCH_VALUE_HI */
++	g6_gw(0x23580, 0xa7a506a0u);            /* SEQ_MEM_0_DRV0 + 0..4 */
++	g6_gw(0x23581, 0xa1e6a6e7u);
++	g6_gw(0x23582, 0xa2e081e1u);
++	g6_gw(0x23583, 0xe9a982e2u);
++	g6_gw(0x23584, 0x0020e8a8u);
++}
++
++static void
++g6_pdc_ucode(void)
++{
++	/* PDC: sequencer microcode and the TCS commands used by its sleep/wake sequences */
++	g6_pw(0xa0000, 0xfebea1e1u);
++	g6_pw(0xa0001, 0xa5a4a3a2u);
++	g6_pw(0xa0002, 0x8382a6e0u);
++	g6_pw(0xa0003, 0xbce3e284u);
++	g6_pw(0xa0004, 0x002081fcu);
++	static const struct {
++		uint32_t base;          /* TCSn_CONTROL */
++		uint32_t data0, data1;  /* DATA of command 0 and 1 */
++	} tcs[2] = { { 0x21572, 1, 0 }, { 0x215d6, 2, 3 } };
++	for (unsigned i = 0; i < 2; i++) {
++		uint32_t c = tcs[i].base;               /* CONTROL; +1 ENABLE_BANK, +2 WAIT_FOR_CMPL, +3 MSGID, +4 ADDR, +5 DATA */
++		g6_pw(c + 1, 7);
++		g6_pw(c + 2, 0);
++		g6_pw(c, 0);
++		g6_pw(c + 3, 0x10108);
++		g6_pw(c + 4, 0x30010);
++		g6_pw(c + 5, tcs[i].data0);
++		g6_pw(c + 3 + 4, 0x10108);
++		g6_pw(c + 4 + 4, 0x30000);
++		g6_pw(c + 5 + 4, tcs[i].data1);
++		g6_pw(c + 3 + 8, 0x10108);
++		g6_pw(c + 4 + 8, 0x30080);
++		g6_pw(c + 5 + 8, tcs[i].data1);
++	}
++	g6_pw(0x21148, 0);                      /* PDC_GPU_SEQ_START_ADDR */
++	g6_pw(0x21140, 0x80000001u);            /* PDC_GPU_ENABLE_PDC */
++}
++
++static void
++g6_stage_b(void)
++{
++	DTEntry chosen;
++	void const *fw = NULL;
++	unsigned fwlen = 0;
++	uint32_t w, first = 0, last = 0, res = 0;
++	unsigned ms;
++	bool booted = false;
++
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++	    SecureDTGetProperty(chosen, G6_STAGE_B_FW, &fw, &fwlen) != kSuccess) {
++		printf("SWEET GPU615: stage B: no %s in /chosen (build the image with mkpayload.py --gpufw)\n", G6_STAGE_B_FW);
++		return;
++	}
++	printf("SWEET GPU615: stage B: GMU firmware %u bytes (expect 32768)\n", fwlen);
++	if (fwlen < 4u * G6_FW_WORDS) {
++		printf("SWEET GPU615: stage B: firmware too short; stopping\n");
++		return;
++	}
++
++	printf("SWEET GPU615: B1: TCM retention, RSC sequencer microcode\n");
++	g6_settle();
++	g6_gw(0x1f9cc, 1);                      /* GMU_GENERAL_7: turn on TCM retention */
++	g6_rsc_pdc_ucode();
++	printf("SWEET GPU615: B2: PDC sequencer microcode\n");
++	g6_settle();
++	g6_pdc_ucode();
++
++	printf("SWEET GPU615: B3: GMU firmware into ITCM\n");
++	g6_settle();
++	for (uint32_t i = 0; i < G6_FW_WORDS; i++) {
++		memcpy(&w, (const uint8_t *)fw + 4u * i, 4);
++		g6_wr(G6_GMU(G6_GMU_ITCM) + 4u * i, w);
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	memcpy(&first, fw, 4);
++	memcpy(&last, (const uint8_t *)fw + 4u * (G6_FW_WORDS - 1u), 4);
++	printf("SWEET GPU615: itcm[0] %#x (fw %#x) itcm[last] %#x (fw %#x)\n", g6_rd(G6_GMU(G6_GMU_ITCM)), first,
++	    g6_rd(G6_GMU(G6_GMU_ITCM) + 4u * (G6_FW_WORDS - 1u)), last);
++
++	printf("SWEET GPU615: B4: boot registers and power configuration\n");
++	g6_settle();
++	g6_gw(0x1f81c, 0);                      /* CM3_FW_INIT_RESULT */
++	g6_gw(0x1f801, 2);                      /* CM3_BOOT_CONFIG = TCM_BOOT */
++	g6_gw(0x1f985, 0);                      /* HFI_QTBL_ADDR: no HFI memory yet */
++	g6_gw(0x1f984, 1);                      /* HFI_QTBL_INFO */
++	g6_gw(0x23b11, G6_FENCE_RANGE);         /* AHB_FENCE_RANGE_0 */
++	g6_gw(0x1f982, G6_CHIPID_SFR);          /* HFI_SFR_ADDR carries the chip id to the firmware */
++	g6_gw(0x1f40f, 1);                      /* GMU_SYS_BUS_CONFIG */
++	g6_gw(0x1f8c0, 0x9c40400);              /* PWR_COL_INTER_FRAME_CTRL */
++	g6_gw(0x1f8e8, g6_rd(G6_GMU(0x1f8e8)) | G6_RPMH_ENABLE);  /* RPMH_CTRL: enable the RPMh client */
++
++	printf("SWEET GPU615: B5: releasing the GMU from reset\n");
++	g6_settle();
++	g6_gw(0x1f802, 0);                      /* CX_GMU_WFI_CONFIG */
++	g6_gw(0x1f800, 1);                      /* CM3_SYSRESET: make sure it is in reset */
++	__asm__ volatile ("dsb sy" ::: "memory");
++	g6_gw(0x1f800, 0);                      /* out of reset */
++	for (ms = 0; ms < 500; ms++) {
++		res = g6_rd(G6_GMU(0x1f81c));
++		if (res == 0xbabefaceu) {
++			booted = true;
++			break;
++		}
++		delay(1000);
++	}
++	printf("SWEET GPU615: GMU %s: init_result %#x after %u ms; general_7 %#x rpmh_state %#x cx_busy %#x\n",
++	    booted ? "BOOTED" : "did not boot", res, ms, g6_rd(G6_GMU(G6_GMU_GENERAL7)), g6_rd(G6_GMU(G6_GMU_RPMH_ST)),
++	    g6_rd(G6_GMU(G6_GMU_CX_BUSY)));
++	g6_settle();
++	printf("SWEET GPU615: after settle: init_result %#x rpmh_state %#x gmu2host_intr_info %#x\n",
++	    g6_rd(G6_GMU(0x1f81c)), g6_rd(G6_GMU(G6_GMU_RPMH_ST)), g6_rd(G6_GMU(0x1f992)));
++}
++
 +static void
 +g6_thread(__unused void *arg, __unused wait_result_t wr)
 +{
@@ -223,6 +381,10 @@ new file mode 100644
 +	printf("SWEET GPU615: smmu cr0 %#x idr0 %#x idr1 %#x idr2 %#x idr7 %#x\n", g6_rd(G6_SMMU_PA + 0x0),
 +	    g6_rd(G6_SMMU_PA + 0x20), g6_rd(G6_SMMU_PA + 0x24), g6_rd(G6_SMMU_PA + 0x28), g6_rd(G6_SMMU_PA + 0x3c));
 +	printf("SWEET GPU615: stage A complete\n");
++	if (g6_stage >= 2) {
++		g6_stage_b();
++		printf("SWEET GPU615: stage B complete\n");
++	}
 +	for (;;) {
 +		(void)tsleep(&g6_chan, PZERO, "g6idle", hz * 3600);
 +	}
@@ -238,6 +400,7 @@ new file mode 100644
 +	if (!enabled) {
 +		return;
 +	}
++	g6_stage = enabled;
 +	if (kernel_thread_start(g6_thread, NULL, &thread) == KERN_SUCCESS) {
 +		thread_deallocate(thread);
 +	}
