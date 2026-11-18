@@ -47,6 +47,28 @@ Next, stage C (GX rail and the Adreno core): the DT has `gpu-quirk-hfi-use-reg`,
 the SQE microcode and zap shader, set up the GPU SMMU context, start the CP ringbuffer and run a fence-write packet.
 HFI queues (GMU-side SMMU context) may be skippable at first; try the OOB path without them.
 
+## Stage C plan and inputs (GX rail on, then the Adreno core)
+Approach: port the Pixel 4 core driver (`sweet_a6xx.c/.h` + the environment of `sweet_gpu.c`, both inside ios-flame's xnu patch
+0095; extracted to work/ref/flame) with renamed symbols (`b6_`/`B6_`, so they cannot clash with the Pixel 4 copy that is still
+compiled into the kernel), and replace the A640-specific parts. Facts gathered for the A615:
+- Bases: GPU 0x5000000, GPUCC 0x5090000, SMMU 0x5040000 (context banks at +0x8000), GMU = GPU + 0x6a000 (same layout as flame,
+  so the RSCC block is at GPU + 0x8d000 and flame's RSCC register list applies unchanged).
+- PDC: DT `kgsl_gmu_pdc_reg` 0xb200000; the GPU PDC block is at 0xb280000 (flame: 0xb290000), sequencer memory at 0xb480000
+  (flame: 0xb490000). TCS command 2 address is 0x30080 (flame: 0x30090).
+- GMU boot is TCM boot (BOOT_CONFIG = 2): the whole 32 KiB image goes to ITCM; no cache windows, no block parsing (done, stage B).
+  Still needed for HFI: SMMU context bank for the GMU stream (DT: gmu_kernel iommus <smmu-kgsl 5>, gmu_user <.. 4>), page tables,
+  HFI queue table and queues in GMU VA space, QTBL_ADDR (stage B wrote 0).
+- cmd-db is read the same way as flame (register 0xc3f000c -> db, magic 0x0c0330db); levels "gfx.lvl", "mx.lvl", "cx.lvl".
+- GPU levels (DT, speed bin 0): 430, 355, 267, 180 MHz and an off level (initial level index 3); ARC levels not in the DT (no OPP
+  nodes), expected NOM 256, SVS_L1 192, SVS 128, LOW_SVS 64: check against what cmd-db offers. GMU levels 0 and 200 MHz.
+- Zap shader: PAS id 13, memory region `gpu_region@0x95c15000` size 0x2000 (flame: 0x9a915000), files a615_zap.mdt + a615_zap.b02.
+- CP bring-up values come from kgsl `a6xx_start()`/`a6xx_hwcg` for the A615 (GMEM 512 KB, highest bank bit 14, UBWC mode 2, min
+  access length 32), not from flame's A640 table.
+- Because of `gpu-quirk-hfi-use-reg` the boot GX rail request is a register OOB (BOOT_SLUMBER_OPTION, GX/MX_VOTE_IDX,
+  HOST2GMU_INTR_SET) done before HFI starts, then HFI sends init, firmware version, perf table, bw table and a final test message.
+Milestones: C1 = GX power domain on (gx_gdsc on, HFI acked); C2 = CP microcode loaded, zap shader accepted, ring runs ME_INIT;
+C3 = a CP_MEM_WRITE fence lands in memory.
+
 ## Reference work to reuse
 `third_party/ios-flame` (Pixel 4, Adreno 640) already has the whole stack; see its `METAL-NEXT.md`:
 kernel A6xx bring-up (`bsd/dev/sweet_a6xx.c`, patches 0095..0122 in xnu/patches), `SweetAccelerator` (IOAcceleratorES +
