@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -700,6 +700,93 @@
+@@ -700,6 +700,105 @@
  	}
  }
  
@@ -31,6 +31,8 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	uint64_t logbase = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
 +	uint64_t seq = 0;
 +	void *bounce = (void *)(su.dma + DMA_BOUNCE);
++	vm_offset_t fbva = 0;           /* v_baseAddr is the panel's PHYSICAL address here: map it ourselves */
++	uint64_t fbphys = 0, fbbytes = 0;
 +
 +	printf("SWEET SHOT: framebuffer snapshot every %u s into two slots below the log (block 0x%llx)\n",
 +	    sweet_shot_period, logbase - 8 - 2 * (uint64_t)SWEET_SHOT_BLOCKS);
@@ -44,6 +46,16 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		if (bytes == 0 || bytes > SWEET_SHOT_MAX_BYTES) {
 +			continue;
 +		}
++		if (fbva == 0 || fbphys != (uint64_t)v.v_baseAddr || fbbytes != bytes) {
++			extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
++			fbva = ml_io_map_wcomb((vm_offset_t)v.v_baseAddr, (vm_size_t)round_page(bytes));
++			fbphys = (uint64_t)v.v_baseAddr;
++			fbbytes = bytes;
++			if (fbva == 0) {
++				printf("SWEET SHOT: cannot map the panel memory\n");
++				return;
++			}
++		}
 +		uint64_t slot = logbase - 8 - (1 + (seq & 1)) * (uint64_t)SWEET_SHOT_BLOCKS;
 +		int error = 0;
 +		for (uint64_t off = 0; off < bytes && !error; off += BOUNCE_SIZE) {
@@ -51,7 +63,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +			uint32_t blocks = (n + UFS_BLOCK - 1) / UFS_BLOCK;
 +			lck_mtx_lock(&sweet_ufs_lock);
 +			bzero((char *)bounce + (blocks * UFS_BLOCK - UFS_BLOCK), UFS_BLOCK);
-+			memcpy(bounce, (const void *)(v.v_baseAddr + off), n);
++			memcpy(bounce, (const void *)(fbva + off), n);
 +			error = ufs_write_blocks(slot + 1 + off / UFS_BLOCK, blocks);
 +			lck_mtx_unlock(&sweet_ufs_lock);
 +		}
