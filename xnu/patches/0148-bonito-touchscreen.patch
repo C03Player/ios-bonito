@@ -670,17 +670,3 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	sweet_usb_probe();      /* boot-arg sweetusb=2 (+ sweetusbdma=<low PA>) starts the USB Ethernet gadget: bsd/dev/sweet_usb.c */
  	{
  		/* sweetusbhold=N: keep the console quiet for N seconds so the USB messages stay on screen (debug) */
-diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
---- a/iokit/Kernel/arm/hid/SweetHID.cpp
-+++ b/iokit/Kernel/arm/hid/SweetHID.cpp
-@@ -356,9 +356,9 @@
-  * app-switcher gesture.
-  */
- #define SWEET_TOUCH_EDGE_PX 48
- /* Touch reports panel pixels; flame's panel is 1080x2280 (SWEET.h). */
- #define SWEET_PANEL_W 1080
--#define SWEET_PANEL_H 2280
-+#define SWEET_PANEL_H 2160
- class SweetHIDTouch : public IOHIDEventService {
- 	OSDeclareDefaultStructors(SweetHIDTouch);
- public:
