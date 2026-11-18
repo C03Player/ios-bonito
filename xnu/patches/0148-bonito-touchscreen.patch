@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -700,7 +700,657 @@
+@@ -700,7 +700,812 @@
  		thread_deallocate(thread);
  	}
  }
@@ -68,7 +68,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	int x[BT_MAX], y[BT_MAX];
 +	uint8_t f01_ctrl, f01_data, f12_query, f12_ctrl, f12_data;
 +	unsigned f12_off1, f12_off15, f12_n;
-+	bool f12_has15, configured;
++	bool f12_has15, configured, bb;
 +	unsigned max_x, max_y;
 +	unsigned reports;
 +} bt;
@@ -297,10 +297,141 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	return err;
 +}
 +
++/* Bit-banged I2C on the same two pins (open drain emulated with the output enable, pull-ups on), ~80 kHz. */
++#define BB_US 5
++static void
++bb_pin(unsigned pin, bool high)
++{
++	uint32_t off = pin * 0x1000u, cfg = bt_rd(bt.north, off);
++	if (high) {
++		bt_wr(bt.north, off, cfg & ~0x200u);
++	} else {
++		bt_wr(bt.north, off + 4u, bt_rd(bt.north, off + 4u) & ~2u);
++		bt_wr(bt.north, off, cfg | 0x200u);
++	}
++}
++
++static void
++bb_sda(bool h)
++{
++	bb_pin(BT_PIN_SDA, h);
++	delay(BB_US);
++}
++
++static void
++bb_scl(bool h)
++{
++	bb_pin(BT_PIN_SCL, h);
++	if (h) {
++		for (unsigned i = 0; i < 200 && !bt_pin(bt.north, BT_PIN_SCL); i++) {
++			delay(5);
++		}
++	}
++	delay(BB_US);
++}
++
++static void
++bb_setup(void)
++{
++	for (unsigned k = 0; k < 2; k++) {
++		unsigned pin = k ? BT_PIN_SCL : BT_PIN_SDA;
++		uint32_t off = pin * 0x1000u;
++		bt_wr(bt.north, off + 4u, bt_rd(bt.north, off + 4u) & ~2u);
++		bt_wr(bt.north, off, (bt_rd(bt.north, off) & ~0x3ffu) | 3u);     /* GPIO, pull-up, output off */
++	}
++	delay(100);
++	printf("SWEET BTOUCH: bit-bang pins: sda %d scl %d\n", bt_pin(bt.north, BT_PIN_SDA), bt_pin(bt.north, BT_PIN_SCL));
++}
++
++static void
++bb_start(void)
++{
++	bb_sda(true);
++	bb_scl(true);
++	bb_sda(false);
++	bb_scl(false);
++}
++
++static void
++bb_stop(void)
++{
++	bb_sda(false);
++	bb_scl(true);
++	bb_sda(true);
++}
++
++static bool
++bb_put(uint8_t v)
++{
++	for (int i = 7; i >= 0; i--) {
++		bb_sda((v >> i) & 1u);
++		bb_scl(true);
++		bb_scl(false);
++	}
++	bb_sda(true);
++	bb_scl(true);
++	bool ack = !bt_pin(bt.north, BT_PIN_SDA);
++	bb_scl(false);
++	return ack;
++}
++
++static uint8_t
++bb_get(bool ack)
++{
++	uint8_t v = 0;
++	bb_sda(true);
++	for (unsigned i = 0; i < 8; i++) {
++		bb_scl(true);
++		v = (uint8_t)((v << 1) | bt_pin(bt.north, BT_PIN_SDA));
++		bb_scl(false);
++	}
++	bb_sda(!ack);
++	bb_scl(true);
++	bb_scl(false);
++	bb_sda(true);
++	return v;
++}
++
++static int
++bb_read(uint8_t reg, uint8_t *buf, unsigned len)
++{
++	bb_start();
++	if (!bb_put((uint8_t)(BT_ADDR << 1))) {
++		bb_stop();
++		return ENXIO;
++	}
++	if (!bb_put(reg)) {
++		bb_stop();
++		return EIO;
++	}
++	bb_start();
++	if (!bb_put((uint8_t)((BT_ADDR << 1) | 1u))) {
++		bb_stop();
++		return ENXIO;
++	}
++	for (unsigned i = 0; i < len; i++) {
++		buf[i] = bb_get(i + 1 < len);
++	}
++	bb_stop();
++	return 0;
++}
++
++static int
++bb_write(uint8_t reg, uint8_t val)
++{
++	bb_start();
++	bool ok = bb_put((uint8_t)(BT_ADDR << 1)) && bb_put(reg) && bb_put(val);
++	bb_stop();
++	return ok ? 0 : ENXIO;
++}
++
 +/* RMI4 register access: pointer write held with a clock stretch, then a repeated-start read. */
 +static int
 +bt_rmi_read(uint8_t reg, uint8_t *buf, unsigned len)
 +{
++	if (bt.bb) {
++		return bb_read(reg, buf, len);
++	}
 +	int err = bt_msg(BT_ADDR, &reg, 1, NULL, 0, true);
 +	if (err) {
 +		return err;
@@ -312,6 +443,9 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +bt_rmi_write(uint8_t reg, uint8_t val)
 +{
 +	uint8_t tx[2] = { reg, val };
++	if (bt.bb) {
++		return bb_write(reg, val);
++	}
 +	return bt_msg(BT_ADDR, tx, 2, NULL, 0, false);
 +}
 +
@@ -350,9 +484,19 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	uint32_t apid = bk_find_apid(ppid, bk_rd(bk_core, 4) & 0x7ffu);
 +	uint32_t base = (ppid & 0xffu) << 8;
 +	uint8_t sub = 0, mode = 0, out = 0, en = 0, vin = 0;
-+	if (apid == BK_NO_APID || !bk_read(apid, base | 0x05, &sub) || !bk_read(apid, base | 0x40, &mode) ||
-+	    !bk_read(apid, base | 0x44, &out) || !bk_read(apid, base | 0x46, &en)) {
-+		printf("SWEET BTOUCH: PM660 GPIO%u unreadable (apid %#x)\n", n, apid);
++	bool r5 = bk_read(apid, base | 0x05, &sub), r40 = bk_read(apid, base | 0x40, &mode);
++	bool r44 = bk_read(apid, base | 0x44, &out), r46 = bk_read(apid, base | 0x46, &en);
++	if (apid == BK_NO_APID || !r5 || !r40 || !r44 || !r46) {
++		uint32_t cnt = bk_rd(bk_core, 4) & 0x7ffu;
++		printf("SWEET BTOUCH: PM660 GPIO%u unreadable: apid %u reads 05/40/44/46 = %d/%d/%d/%d\n", n, apid, r5, r40,
++		    r44, r46);
++		for (uint32_t i = 0; i < cnt; i++) {
++			uint32_t m = bk_rd(bk_core, 0x900u + 4u * i);
++			if (m && ((m >> 8) & 0xfffu) == ppid) {
++				printf("SWEET BTOUCH:   apid %u maps ppid %#x owner %u\n", i, ppid,
++				    bk_rd(bk_cnfg, 0x700u + 4u * i) & 7u);
++			}
++		}
 +		return;
 +	}
 +	(void)bk_read(apid, base | 0x41, &vin);
@@ -491,15 +635,26 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +{
 +	int err = bt_rmi_write(0xff, 0);
 +	if (err) {
-+		printf("SWEET BTOUCH: no ACK from %#x (err %d, irq-status %#x); scanning the bus\n", BT_ADDR, err,
-+		    bt.irq_status);
-+		for (unsigned a = 0x08; a < 0x78 && !bt.dead; a++) {
-+			uint8_t b;
-+			if (bt_msg((uint8_t)a, NULL, 0, &b, 1, false) == 0) {
-+				printf("SWEET BTOUCH: device answers at %#x\n", a);
++		printf("SWEET BTOUCH: GENI I2C: no answer from %#x (err %d, irq-status %#x, se status %#x, scl %d sda %d)\n",
++		    BT_ADDR, err, bt.irq_status, bt_rd(bt.se, BT_SE_STATUS), bt_pin(bt.north, BT_PIN_SCL),
++		    bt_pin(bt.north, BT_PIN_SDA));
++		bt.bb = true;
++		bt.dead = false;
++		bb_setup();
++		err = bt_rmi_write(0xff, 0);
++		if (err) {
++			printf("SWEET BTOUCH: bit-banged I2C: no answer from %#x either (err %d); scanning\n", BT_ADDR, err);
++			for (unsigned a = 0x08; a < 0x78; a++) {
++				bb_start();
++				bool ack = bb_put((uint8_t)(a << 1));
++				bb_stop();
++				if (ack) {
++					printf("SWEET BTOUCH: device answers at %#x\n", a);
++				}
 +			}
++			return false;
 +		}
-+		return false;
++		printf("SWEET BTOUCH: bit-banged I2C reaches %#x; the GENI engine does not, continuing bit-banged\n", BT_ADDR);
 +	}
 +	bool f01 = false, f12 = false;
 +	uint8_t f12q = 0, f12c = 0, f12d = 0;
