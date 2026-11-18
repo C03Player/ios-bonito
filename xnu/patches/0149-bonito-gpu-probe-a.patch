@@ -12,7 +12,7 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/bonito_gpu.c
-@@ -0,0 +1,980 @@
+@@ -0,0 +1,1129 @@
 +/*
 + * bonito GPU bring-up probe, stage A (boot-arg sweetgpu=1; sweetgpudelay=SECS before it starts, default 60).
 + *
@@ -181,8 +181,17 @@ new file mode 100644
 +}
 +
 +/* Sleep so the persistent log (flushed every ufslogsecs, default 2) has the lines above before the next access. */
++static int g6_fast;
++
 +static void
 +g6_settle(void)
++{
++	(void)tsleep(&g6_chan, PZERO, "g6settle", g6_fast ? hz / 20 : hz * 3);
++}
++
++/* Always the full pause: for steps that have not run on the phone yet. */
++static void
++g6_settle_slow(void)
 +{
 +	(void)tsleep(&g6_chan, PZERO, "g6settle", hz * 3);
 +}
@@ -445,6 +454,7 @@ new file mode 100644
 +
 +static void g6_stage_c2a(void);
 +static void g6_stage_c2b(void);
++static void g6_stage_c4(void);
 +
 +static void
 +g6_stage_c1(void)
@@ -891,6 +901,135 @@ new file mode 100644
 +	g6_pread(G6_OFF_SCRATCH, &got, 4);
 +	g6_smmu_fault();
 +	printf("SWEET GPU615: C3: scratch reads %#x (want %#x): %s\n", got, marker, got == marker ? "THE GPU RAN A COMMAND" : "no write");
++	if (got == marker && g6_stage >= 5) {
++		g6_stage_c4();
++	}
++}
++
++/* ---- stage C4: GPU page-table mappings beyond the pool, and work submitted by indirect buffer ---- */
++
++#define G6_OFF_PT_ARENA 0x102000ull
++#define G6_OFF_TEST_IB  0x300000ull
++#define G6_GVA_TESTBUF  0x100000000ull          /* 4 GiB: L1 index 4, a fresh L2 and L3 from the arena */
++#define G6_TESTBUF_SIZE 0x10000u
++
++static vm_offset_t g6_buf_kva;
++static uint64_t g6_buf_pa;
++static uint32_t g6_pt_next;
++
++static uint64_t
++g6_pt_alloc(void)
++{
++	uint64_t off = G6_OFF_PT_ARENA + 0x1000ull * g6_pt_next;
++	if (off + 0x1000 > G6_OFF_SQE) {
++		return 0;
++	}
++	g6_pt_next++;
++	static const uint8_t zeros[0x1000];
++	g6_pwrite(off, zeros, sizeof(zeros));
++	return off;
++}
++
++/* Next-level table (as a pool offset) for entry idx of the table at pool offset table; allocated if empty. */
++static uint64_t
++g6_pt_walk(uint64_t table, unsigned idx)
++{
++	uint64_t e = 0, t;
++
++	g6_pread(table + 8ull * idx, &e, 8);
++	if (e & 1u) {
++		return (e & 3u) == 3u ? (e & 0xfffffff000ull) - g6_pool_pa : 0;     /* 0: a block */
++	}
++	t = g6_pt_alloc();
++	if (t) {
++		g6_pw64(table + 8ull * idx, (g6_pool_pa + t) | 3u);
++	}
++	return t;
++}
++
++/* 4 KiB pages (AP=01, non-cacheable, inner shareable) at iova -> pa, physically contiguous. */
++static bool
++g6_map(uint64_t iova, uint64_t pa, uint64_t size)
++{
++	for (uint64_t o = 0; o < size; o += 0x1000) {
++		uint64_t va = iova + o;
++		uint64_t l2 = g6_pt_walk(G6_OFF_GT_L1, (unsigned)((va >> 30) & 0x1ff));
++		uint64_t l3 = l2 ? g6_pt_walk(l2, (unsigned)((va >> 21) & 0x1ff)) : 0;
++		if (!l3) {
++			printf("SWEET GPU615: map: no page table for %#llx\n", (unsigned long long)va);
++			return false;
++		}
++		g6_pw64(l3 + 8ull * ((va >> 12) & 0x1ff), (pa + o) | (1u << 10) | (3u << 8) | (1u << 6) | 3u);
++	}
++	return true;
++}
++
++static void
++g6_tlb_flush(void)
++{
++	vm_offset_t c0 = G6_SMMU_CB((uint32_t)g6_gpu_cb);
++	g6_wr(c0 + 0x618, 0);                   /* TLBIALL */
++	g6_wr(c0 + 0x7f0, 0);                   /* TLBSYNC */
++	(void)g6_wait(c0 + 0x7f4, 1, false, 10);
++}
++
++/* An indirect buffer at iova, then WAIT_FOR_IDLE and a fence write; true when the fence landed. */
++static bool
++g6_submit_ib(uint64_t iova, uint32_t dwords, const char *what)
++{
++	uint64_t fva = G6_GVA_POOL + G6_OFF_SCRATCH + 0x10;
++	uint32_t fence = ++g6_fence, got = 0;
++	uint32_t dw[] = {
++		g6_pkt7(0x3f, 3), (uint32_t)iova, (uint32_t)(iova >> 32), dwords,     /* CP_INDIRECT_BUFFER */
++		g6_pkt7(G6_CP_WAIT_FOR_IDLE, 0),
++		g6_pkt7(G6_CP_MEM_WRITE, 3), (uint32_t)fva, (uint32_t)(fva >> 32), fence,
++	};
++	int rc = g6_ring(dw, sizeof(dw) / 4, what, 1000);
++	g6_pread(G6_OFF_SCRATCH + 0x10, &got, 4);
++	if (rc || got != fence) {
++		g6_smmu_fault();
++	}
++	return !rc && got == fence;
++}
++
++static void
++g6_stage_c4(void)
++{
++	uint32_t a = 0, b = 0, ib[8];
++	uint64_t bva = G6_GVA_TESTBUF;
++
++	if (!g6_buf_kva || g6_gpu_cb < 0) {
++		printf("SWEET GPU615: C4: no test buffer or GPU context; skipping\n");
++		return;
++	}
++	printf("SWEET GPU615: C4: mapping a %u KiB kernel buffer (pa %#llx) at GPU VA %#llx\n", G6_TESTBUF_SIZE / 1024,
++	    (unsigned long long)g6_buf_pa, (unsigned long long)bva);
++	g6_settle_slow();
++	if (!g6_map(bva, g6_buf_pa, G6_TESTBUF_SIZE)) {
++		return;
++	}
++	g6_tlb_flush();
++	printf("SWEET GPU615: C4: mapped; page tables used %u\n", g6_pt_next);
++
++	/* An IB that writes one marker into the first and one into the second 4 KiB page of the buffer. */
++	ib[0] = g6_pkt7(G6_CP_MEM_WRITE, 3);
++	ib[1] = (uint32_t)bva;
++	ib[2] = (uint32_t)(bva >> 32);
++	ib[3] = 0xc0ffee11u;
++	ib[4] = g6_pkt7(G6_CP_MEM_WRITE, 3);
++	ib[5] = (uint32_t)(bva + 0x1000);
++	ib[6] = (uint32_t)((bva + 0x1000) >> 32);
++	ib[7] = 0xc0ffee22u;
++	g6_pwrite(G6_OFF_TEST_IB, ib, sizeof(ib));
++	printf("SWEET GPU615: C4: submitting the IB (indirect buffer at GPU VA %#llx, %zu dwords)\n",
++	    (unsigned long long)(G6_GVA_POOL + G6_OFF_TEST_IB), (unsigned)(sizeof(ib) / 4));
++	g6_settle_slow();
++	bool ok = g6_submit_ib(G6_GVA_POOL + G6_OFF_TEST_IB, sizeof(ib) / 4, "ib");
++	flush_dcache64((addr64_t)g6_buf_pa, G6_TESTBUF_SIZE, TRUE);
++	a = *(volatile uint32_t *)g6_buf_kva;
++	b = *(volatile uint32_t *)(g6_buf_kva + 0x1000);
++	printf("SWEET GPU615: C4: fence %s; buffer page 0 reads %#x (want 0xc0ffee11), page 1 reads %#x (want 0xc0ffee22): %s\n",
++	    ok ? "landed" : "MISSING", a, b, (ok && a == 0xc0ffee11u && b == 0xc0ffee22u) ? "IB AND MAPPING WORK" : "FAILED");
 +}
 +
 +static void
@@ -985,8 +1124,18 @@ new file mode 100644
 +		return;
 +	}
 +	g6_stage = enabled;
++	PE_parse_boot_argn("sweetgpufast", &g6_fast, sizeof(g6_fast));
 +	if (enabled >= 4) {
 +		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
++	}
++	if (enabled >= 5) {
++		vm_offset_t bva = 0;
++		if (kmem_alloc_contig(kernel_map, &bva, G6_TESTBUF_SIZE, PAGE_MASK, 0, 0, KMA_DATA | KMA_ZERO | KMA_PERMANENT,
++		    VM_KERN_MEMORY_IOKIT) == KERN_SUCCESS) {
++			g6_buf_kva = bva;
++			g6_buf_pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)bva));
++			flush_dcache64((addr64_t)g6_buf_pa, G6_TESTBUF_SIZE, TRUE);
++		}
 +	}
 +	if (kernel_thread_start(g6_thread, NULL, &thread) == KERN_SUCCESS) {
 +		thread_deallocate(thread);
