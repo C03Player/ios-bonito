@@ -12,7 +12,7 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/bonito_gpu.c
-@@ -0,0 +1,582 @@
+@@ -0,0 +1,976 @@
 +/*
 + * bonito GPU bring-up probe, stage A (boot-arg sweetgpu=1; sweetgpudelay=SECS before it starts, default 60).
 + *
@@ -36,6 +36,12 @@ new file mode 100644
 + * BOOT_SLUMBER_OPTION/GX_VOTE_IDX/MX_VOTE_IDX, then OOB bit 22 is set and bit 30 of GMU2HOST_INTR_INFO is the ack. Success is
 + * the GPU CC's GX GDSC reporting power on. The tables are logged: the real ARC levels are not in the DT.
 + *
++ * Stage C2b/C3 (sweetgpu=4): a 16 MiB contiguous pool (GPU page tables, SQE microcode, ring, scratch), the GPU's SMMU
++ * context bank, the A615 register setup (kgsl a6xx_start() with the DT values: GMEM 512 KiB, highest bank bit 14, UBWC mode
++ * 2), SQE microcode, the zap shader through TrustZone (PAS 13, region 0x95c15000), ring + ME_INIT, then CP_MEM_WRITE of a
++ * marker into the pool and a read-back of it. Structure and most register values follow the Pixel 4 core driver
++ * (ios-flame xnu patch 0095, sweet_a6xx.c).
++ *
 + * A bus access to an unclocked block hangs the SoC. Every step therefore prints what it is about to do and then sleeps
 + * long enough for the persistent console log (flushed every ufslogsecs) to hold that line before the risky access.
 + */
@@ -49,9 +55,13 @@ new file mode 100644
 +#include <pexpert/device_tree.h>
 +#include <vm/pmap.h>
 +#include <vm/vm_kern.h>
++#include <arm/caches_internal.h>
++#include <libkern/libkern.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +extern int hz;
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern void sweet_smc(uint64_t x[8]);
 +extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 +void sweet_gpu615_start(void);
 +
@@ -434,6 +444,7 @@ new file mode 100644
 +}
 +
 +static void g6_stage_c2a(void);
++static void g6_stage_c2b(void);
 +
 +static void
 +g6_stage_c1(void)
@@ -465,6 +476,9 @@ new file mode 100644
 +	printf("SWEET GPU615: C1: after settle: gx gdsc %#x (bit 31 = power on), cx_busy %#x, gmu2host_intr_info %#x\n",
 +	    g6_rd(G6_CC_PA + G6_CC_GX_GDSCR), g6_rd(G6_GMU(G6_GMU_CX_BUSY)), g6_rd(G6_GMU(0x1f992)));
 +	g6_stage_c2a();
++	if (g6_stage >= 4) {
++		g6_stage_c2b();
++	}
 +}
 +
 +/* ---- stage C2a: shader power (SPTPRAC) and a first look at the GPU core ---- */
@@ -496,6 +510,386 @@ new file mode 100644
 +	g6_wr(G6_GMU(0x800), v0);
 +	printf("SWEET GPU615: C2a: cp_rb_base write test %#x -> %#x (want 0x12345000), restored %#x\n", v0, v1,
 +	    g6_rd(G6_GMU(0x800)));
++}
++
++/* ---- stage C2b / C3: pool, SMMU, SQE, zap shader, ring, first command ---- */
++
++#define G6_POOL_SIZE    0x1000000ull
++#define G6_POOL_ALIGN   0x200000ull
++#define G6_OFF_ZAP_META 0x0a0000ull
++#define G6_OFF_GT_L1    0x100000ull
++#define G6_OFF_GT_L2    0x101000ull
++#define G6_OFF_SQE      0x200000ull
++#define G6_OFF_RING     0x210000ull
++#define G6_OFF_SCRATCH  0x218000ull
++#define G6_GVA_POOL     0x10000000ull
++#define G6_RING_SIZE    0x8000u
++#define G6_RING_DW      (G6_RING_SIZE / 4)
++
++#define G6_SMMU(o)      (G6_SMMU_PA + (o))
++#define G6_SMMU_CB(n)   (G6_SMMU_PA + 0x8000u + 0x1000u * (n))
++#define G6_SMR(n)       G6_SMMU(0x800u + 4u * (n))
++#define G6_S2CR(n)      G6_SMMU(0xc00u + 4u * (n))
++#define G6_CBAR(n)      G6_SMMU(0x1000u + 4u * (n))
++#define G6_CBA2R(n)     G6_SMMU(0x1800u + 4u * (n))
++#define G6_CB_SCTLR     0x00u
++#define G6_CB_TCR2      0x10u
++#define G6_CB_TTBR0     0x20u
++#define G6_CB_TCR       0x30u
++#define G6_CB_MAIR0     0x38u
++#define G6_CB_FSR       0x58u
++#define G6_CB_FAR       0x60u
++#define G6_CB_FSYNR0    0x68u
++#define G6_TCR2_VAL     ((7u << 15) | 2u)
++#define G6_GPU_SID      0u
++
++#define G6_PAS_GPU      13u
++#define G6_ZAP_REGION   0x95c15000ull
++#define G6_ZAP_SIZE     0x2000u
++
++static vm_offset_t g6_pool_kva;
++static uint64_t g6_pool_pa;
++static uint32_t g6_wptr, g6_fence;
++static int g6_gpu_cb = -1;
++
++static void
++g6_pwrite(uint64_t off, const void *buf, size_t len)
++{
++	memcpy((void *)(g6_pool_kva + off), buf, len);
++	flush_dcache64((addr64_t)(g6_pool_pa + off), (unsigned)len, TRUE);
++}
++
++static void
++g6_pread(uint64_t off, void *buf, size_t len)
++{
++	flush_dcache64((addr64_t)(g6_pool_pa + off), (unsigned)len, TRUE);
++	memcpy(buf, (const void *)(g6_pool_kva + off), len);
++}
++
++static void
++g6_pw64(uint64_t off, uint64_t v)
++{
++	g6_pwrite(off, &v, 8);
++}
++
++static void
++g6_w64(vm_offset_t pa, uint64_t v)
++{
++	g6_wr(pa, (uint32_t)v);
++	g6_wr(pa + 4, (uint32_t)(v >> 32));
++}
++
++static bool
++g6_pool_alloc(void)
++{
++	vm_offset_t va = 0;
++	if (g6_pool_kva) {
++		return true;
++	}
++	if (kmem_alloc_contig(kernel_map, &va, G6_POOL_SIZE, PAGE_MASK, 0, (ppnum_t)(atop_64(G6_POOL_ALIGN) - 1),
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET GPU615: no contiguous 16 MiB pool\n");
++		return false;
++	}
++	g6_pool_pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)va));
++	g6_pool_kva = va;
++	flush_dcache64((addr64_t)g6_pool_pa, (unsigned)G6_POOL_SIZE, TRUE);
++	printf("SWEET GPU615: pool kva %#lx pa %#llx\n", (unsigned long)va, (unsigned long long)g6_pool_pa);
++	return true;
++}
++
++static const uint8_t *
++g6_firmware(const char *name, uint32_t *len)
++{
++	DTEntry chosen;
++	void const *data;
++	unsigned size;
++	char prop[40];
++
++	snprintf(prop, sizeof(prop), "gpufw,%s", name);
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++	    SecureDTGetProperty(chosen, prop, &data, &size) != kSuccess) {
++		printf("SWEET GPU615: no firmware %s in /chosen\n", name);
++		return NULL;
++	}
++	*len = size;
++	return (const uint8_t *)data;
++}
++
++/* The GPU's stream gets its own context bank: 39-bit VA (T0SZ 25), tables in the pool, SID 0 exactly. */
++static bool
++g6_smmu_gpu(void)
++{
++	uint32_t nsmr = g6_rd(G6_SMMU(0x20)) & 0xffu, ncb = g6_rd(G6_SMMU(0x24)) & 0xffu, used_cb = 0;
++	int smr = -1, cb = -1;
++
++	for (uint32_t i = 0; i < nsmr; i++) {
++		uint32_t m = g6_rd(G6_SMR(i)), c = g6_rd(G6_S2CR(i));
++		if ((m >> 31) && ((c >> 16) & 3) == 0) {
++			used_cb |= 1u << (c & 0xffu);
++		}
++		if (smr < 0 && !(m >> 31)) {
++			smr = (int)i;
++		}
++	}
++	for (uint32_t i = 0; i < ncb; i++) {
++		if (cb < 0 && !(used_cb & (1u << i)) && !(g6_rd(G6_SMMU_CB(i) + G6_CB_SCTLR) & 1u)) {
++			cb = (int)i;
++		}
++	}
++	printf("SWEET GPU615: smmu: %u stream groups, %u context banks, free smr %d cb %d\n", nsmr, ncb, smr, cb);
++	if (smr < 0 || cb < 0) {
++		return false;
++	}
++	/* GPU page tables: L1 -> L2; the pool as 2 MiB blocks at G6_GVA_POOL (AP=01, non-cacheable, inner shareable). */
++	uint64_t l1 = G6_OFF_GT_L1, l2 = G6_OFF_GT_L2;
++	g6_pw64(l1, (g6_pool_pa + l2) | 3);
++	for (uint64_t o = 0; o < G6_POOL_SIZE; o += 0x200000) {
++		g6_pw64(l2 + 8 * (((G6_GVA_POOL + o) >> 21) & 0x1ff), (g6_pool_pa + o) | (1u << 10) | (3u << 8) | (1u << 6) | 1u);
++	}
++	vm_offset_t c0 = G6_SMMU_CB((uint32_t)cb);
++	g6_wr(c0 + G6_CB_SCTLR, 0);
++	g6_wr(G6_CBA2R((uint32_t)cb), 1);
++	g6_wr(G6_CBAR((uint32_t)cb), (1u << 16) | (0xfu << 12) | (3u << 8) | ((uint32_t)cb + 1u));
++	g6_wr(c0 + G6_CB_TCR2, G6_TCR2_VAL);
++	g6_w64(c0 + G6_CB_TTBR0, g6_pool_pa + l1);
++	g6_wr(c0 + G6_CB_TCR, 25u | (1u << 8) | (1u << 10) | (3u << 12) | (1u << 23));
++	g6_wr(c0 + G6_CB_MAIR0, 0x0000ff44u);
++	g6_wr(c0 + G6_CB_FSR, 0xffffffffu);
++	g6_wr(c0 + G6_CB_SCTLR, 1u | 2u | 4u | 0x20u | 0x40u);
++	g6_wr(G6_SMMU(0x68), 0);                /* TLBIALLNSNH */
++	g6_wr(G6_SMMU(0x70), 0);                /* TLBGSYNC */
++	(void)g6_wait(G6_SMMU(0x74), 1, false, 10);
++	g6_wr(G6_S2CR((uint32_t)smr), (uint32_t)cb);
++	g6_wr(G6_SMR((uint32_t)smr), (1u << 31) | G6_GPU_SID);
++	g6_gpu_cb = cb;
++	printf("SWEET GPU615: smmu: smr%d %#x -> cb%d cbar %#x sctlr %#x tcr %#x tcr2 %#x\n", smr, g6_rd(G6_SMR((uint32_t)smr)),
++	    cb, g6_rd(G6_CBAR((uint32_t)cb)), g6_rd(c0 + G6_CB_SCTLR), g6_rd(c0 + G6_CB_TCR), g6_rd(c0 + G6_CB_TCR2));
++	return true;
++}
++
++static uint32_t
++g6_parity(uint32_t v)
++{
++	return (0x9669u >> (0xfu & (v ^ (v >> 4) ^ (v >> 8) ^ (v >> 12) ^ (v >> 16) ^ (v >> 20) ^ (v >> 24) ^ (v >> 28)))) & 1u;
++}
++
++static uint32_t
++g6_pkt7(uint32_t op, uint32_t cnt)
++{
++	return 0x70000000u | cnt | (g6_parity(cnt) << 15) | ((op & 0x7fu) << 16) | (g6_parity(op) << 23);
++}
++
++#define G6_CP_ME_INIT           0x48u
++#define G6_CP_WAIT_FOR_IDLE     0x26u
++#define G6_CP_MEM_WRITE         0x3du
++#define G6_CP_SET_SECURE_MODE   0x66u
++
++#define G6_CP_RB_BASE           0x800u
++#define G6_CP_RB_CNTL           0x802u
++#define G6_CP_RB_RPTR           0x806u
++#define G6_CP_RB_WPTR           0x807u
++#define G6_CP_SQE_CNTL          0x808u
++#define G6_CP_HW_FAULT          0x821u
++#define G6_CP_STATUS_1          0x825u
++#define G6_CP_SQE_INSTR_BASE    0x830u
++#define G6_RBBM_STATUS          0x210u
++#define G6_RBBM_INT_STATUS      0x201u
++
++static int
++g6_ring(const uint32_t *dw, uint32_t n, const char *what, unsigned timeout_ms)
++{
++	uint32_t w = g6_wptr, first = n < G6_RING_DW - w ? n : G6_RING_DW - w;
++	unsigned i;
++
++	g6_pwrite(G6_OFF_RING + 4ull * w, dw, 4ull * first);
++	if (first < n) {
++		g6_pwrite(G6_OFF_RING, dw + first, 4ull * (n - first));
++	}
++	g6_wptr = (w + n) % G6_RING_DW;
++	g6_wr(G6_GMU(G6_CP_RB_WPTR), g6_wptr);
++	for (i = 0; i < timeout_ms * 10; i++) {
++		if (g6_rd(G6_GMU(G6_CP_RB_RPTR)) == g6_wptr && !(g6_rd(G6_GMU(G6_RBBM_STATUS)) & (1u << 23))) {
++			break;
++		}
++		if ((i & 7) == 7) {
++			delay(1000);
++		}
++	}
++	bool ok = i < timeout_ms * 10;
++	printf("SWEET GPU615: ring %s: rptr %#x wptr %#x rbbm_status %#x int %#x hw_fault %#x cp_status_1 %#x %s\n", what,
++	    g6_rd(G6_GMU(G6_CP_RB_RPTR)), g6_wptr, g6_rd(G6_GMU(G6_RBBM_STATUS)), g6_rd(G6_GMU(G6_RBBM_INT_STATUS)),
++	    g6_rd(G6_GMU(G6_CP_HW_FAULT)), g6_rd(G6_GMU(G6_CP_STATUS_1)), ok ? "idle" : "TIMEOUT");
++	return ok ? 0 : -1;
++}
++
++static void
++g6_smmu_fault(void)
++{
++	if (g6_gpu_cb < 0) {
++		return;
++	}
++	vm_offset_t c0 = G6_SMMU_CB((uint32_t)g6_gpu_cb);
++	uint32_t fsr = g6_rd(c0 + G6_CB_FSR);
++	if (fsr & 0xc00001feu) {
++		printf("SWEET GPU615: smmu cb%d FAULT fsr %#x far %#x%08x fsynr0 %#x\n", g6_gpu_cb, fsr, g6_rd(c0 + G6_CB_FAR + 4),
++		    g6_rd(c0 + G6_CB_FAR), g6_rd(c0 + G6_CB_FSYNR0));
++	}
++}
++
++/* Zap shader through the TrustZone PAS interface (as the Pixel 4 code does it with its own PAS id and region). */
++static int64_t
++g6_scm(uint32_t cmd, uint64_t arginfo, uint64_t a, uint64_t b, uint64_t c, uint64_t *r1)
++{
++	uint64_t x[8] = { 0x42000000ull | (2u << 8) | cmd, arginfo, a, b, c, 0, 0, 0 };
++	sweet_smc(x);
++	if (r1) {
++		*r1 = x[1];
++	}
++	return (int64_t)x[0];
++}
++
++static bool
++g6_zap_load(void)
++{
++	uint64_t r1 = 0;
++	uint32_t mlen = 0, slen = 0;
++	const uint8_t *mdt = g6_firmware("a615_zap.mdt", &mlen), *b02 = g6_firmware("a615_zap.b02", &slen);
++	static uint8_t seg[G6_ZAP_SIZE];
++
++	if (!mdt || !b02 || slen > G6_ZAP_SIZE) {
++		return false;
++	}
++	g6_pwrite(G6_OFF_ZAP_META, mdt, mlen);
++	int64_t rc = g6_scm(1, 2 | (2u << 6), G6_PAS_GPU, g6_pool_pa + G6_OFF_ZAP_META, 0, &r1);
++	printf("SWEET GPU615: zap: init image rc %lld r1 %#llx\n", (long long)rc, (unsigned long long)r1);
++	if (rc || r1) {
++		return false;
++	}
++	rc = g6_scm(2, 3, G6_PAS_GPU, G6_ZAP_REGION, G6_ZAP_SIZE, &r1);
++	printf("SWEET GPU615: zap: mem setup rc %lld r1 %#llx\n", (long long)rc, (unsigned long long)r1);
++	if (rc || r1) {
++		return false;
++	}
++	memset(seg, 0, sizeof(seg));
++	memcpy(seg, b02, slen);
++	for (uint32_t o = 0; o < G6_ZAP_SIZE; o += 4) {
++		uint32_t w;
++		memcpy(&w, seg + o, 4);
++		volatile uint32_t *r = g6_reg_ex((vm_offset_t)(G6_ZAP_REGION + o), true);
++		if (!r) {
++			printf("SWEET GPU615: zap: cannot map the zap region\n");
++			return false;
++		}
++		*r = w;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	rc = g6_scm(5, 1, G6_PAS_GPU, 0, 0, &r1);
++	printf("SWEET GPU615: zap: auth and reset rc %lld r1 %#llx\n", (long long)rc, (unsigned long long)r1);
++	return !(rc || r1);
++}
++
++static void
++g6_stage_c2b(void)
++{
++	static const uint32_t init[][2] = {
++		{ 0xf803, 0 }, { 0xf800, 0 }, { 0xf801, 0 }, { 0xf802, 0 },    /* SECVID TSB */
++		/* 64-bit addressing: CP VSC GRAS RB PC HLSQ VFD VPC UCHE SP TPL1 SECVID */
++		{ 0x0842, 1 }, { 0x0c01, 1 }, { 0x8601, 1 }, { 0x8e05, 1 }, { 0x9e01, 1 }, { 0xbe05, 1 },
++		{ 0xa601, 1 }, { 0x9601, 1 }, { 0x0e00, 1 }, { 0xae01, 1 }, { 0xb601, 1 }, { 0xf810, 1 },
++		{ 0x0010, 3 },                          /* RBBM_VBIF_CLIENT_QOS_CNTL (a615_gbif) */
++		{ 0x0e3a, 0x10200f9 },                  /* UCHE_GBIF_GX_CONFIG (gpu-quirk-limit-uche-gbif-rw) */
++		{ 0x050b, 0xffffffff },                 /* RBBM_PERFCTR_GPU_BUSY_MASKED */
++		{ 0x0e05, 0xffffffc0 }, { 0x0e06, 0x1ffff }, { 0x0e09, 0xfffff000 }, { 0x0e0a, 0x1ffff },
++		{ 0x0e07, 0xfffff000 }, { 0x0e08, 0x1ffff },
++		{ 0x0e0b, 0x100000 }, { 0x0e0c, 0 }, { 0x0e0d, 0x17ffff }, { 0x0e0e, 0 },     /* GMEM range: 512 KiB */
++		{ 0x0e18, 0x804 }, { 0x0e17, 0x4 },
++		{ 0x08c2, 0x010000c0 }, { 0x08c1, 0x8040362c }, { 0x08c3, 128 },             /* ROQ thresholds, mem pool */
++		{ 0x098d, 1 }, { 0x0500, 1 },
++		{ 0x001f, (1u << 30) | 0x1fffff },      /* RBBM_INTERFACE_HANG_INT_CNTL */
++		{ 0x0e19, 1 },                          /* UCHE_CLIENT_PF */
++		{ 0x9e00, 0x00180000 },                 /* PC_DBG_ECO_CNTL */
++		/* highest bank bit 14 -> 1, UBWC 2.0 -> mode 0, min access length 32 */
++		{ 0x8e08, 2 }, { 0xb604, 2 }, { 0xae02, 2 }, { 0x0e01, 1u << 21 },
++	};
++	const uint8_t *sqe;
++	uint32_t len = 0, secure[2], me_init[9], i;
++
++	printf("SWEET GPU615: C2b: pool\n");
++	g6_settle();
++	if (!g6_pool_alloc()) {
++		return;
++	}
++	printf("SWEET GPU615: C2b: SMMU context for the GPU\n");
++	g6_settle();
++	if (!g6_smmu_gpu()) {
++		return;
++	}
++	printf("SWEET GPU615: C2b: GPU register setup (a6xx_start for the A615)\n");
++	g6_settle();
++	g6_wr(G6_GMU(0x3c45), 0);               /* GBIF_HALT */
++	(void)g6_rd(G6_GMU(0x3c45));
++	g6_wr(G6_GMU(0x16), 0);                 /* RBBM_GBIF_HALT */
++	(void)g6_rd(G6_GMU(0x16));
++	for (i = 0; i < sizeof(init) / sizeof(init[0]); i++) {
++		g6_wr(G6_GMU(init[i][0]), init[i][1]);
++	}
++	printf("SWEET GPU615: C2b: loading the SQE microcode and starting the CP\n");
++	g6_settle();
++	sqe = g6_firmware("a630_sqe.fw", &len);
++	if (!sqe || len < 8 || len > 0x10000) {
++		return;
++	}
++	g6_pwrite(G6_OFF_SQE, sqe + 4, (len - 4 + 3) & ~3u);                 /* minus the first dword */
++	g6_wr(G6_GMU(G6_CP_SQE_INSTR_BASE), (uint32_t)(G6_GVA_POOL + G6_OFF_SQE));
++	g6_wr(G6_GMU(G6_CP_SQE_INSTR_BASE + 1), 0);
++	g6_wr(G6_GMU(G6_CP_RB_BASE), (uint32_t)(G6_GVA_POOL + G6_OFF_RING));
++	g6_wr(G6_GMU(G6_CP_RB_BASE + 1), 0);
++	g6_wr(G6_GMU(G6_CP_RB_CNTL), 0x0800020c);                            /* 32 KiB ring, 32-byte blocks, no rptr update */
++	g6_wptr = 0;
++	g6_wr(G6_GMU(G6_CP_SQE_CNTL), 1);
++	g6_settle();
++	g6_smmu_fault();
++
++	me_init[0] = g6_pkt7(G6_CP_ME_INIT, 8);
++	me_init[1] = 0x2f;
++	me_init[2] = 3;
++	me_init[3] = 0x20000000;
++	for (i = 4; i < 9; i++) {
++		me_init[i] = 0;
++	}
++	printf("SWEET GPU615: C2b: ME_INIT\n");
++	g6_settle();
++	if (g6_ring(me_init, 9, "me_init", 1000)) {
++		g6_smmu_fault();
++		return;
++	}
++	printf("SWEET GPU615: C2b: zap shader\n");
++	g6_settle();
++	if (!g6_zap_load()) {
++		return;
++	}
++	secure[0] = g6_pkt7(G6_CP_SET_SECURE_MODE, 1);
++	secure[1] = 0;
++	g6_settle();
++	if (g6_ring(secure, 2, "secure mode off", 1000)) {
++		g6_smmu_fault();
++		return;
++	}
++
++	/* C3: the first GPU work: CP_MEM_WRITE of a marker into the pool's scratch page, then WAIT_FOR_IDLE. */
++	uint64_t fva = G6_GVA_POOL + G6_OFF_SCRATCH;
++	uint32_t marker = 0x6a615000u | ++g6_fence, got = 0;
++	uint32_t dw[] = {
++		g6_pkt7(G6_CP_MEM_WRITE, 3), (uint32_t)fva, (uint32_t)(fva >> 32), marker,
++		g6_pkt7(G6_CP_WAIT_FOR_IDLE, 0),
++	};
++	printf("SWEET GPU615: C3: CP_MEM_WRITE %#x to GPU VA %#llx\n", marker, (unsigned long long)fva);
++	g6_settle();
++	g6_ring(dw, sizeof(dw) / 4, "mem_write", 1000);
++	g6_pread(G6_OFF_SCRATCH, &got, 4);
++	g6_smmu_fault();
++	printf("SWEET GPU615: C3: scratch reads %#x (want %#x): %s\n", got, marker, got == marker ? "THE GPU RAN A COMMAND" : "no write");
 +}
 +
 +static void
