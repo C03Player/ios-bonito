@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -700,6 +700,92 @@
+@@ -700,6 +700,93 @@
  	}
  }
  
@@ -56,10 +56,11 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +			lck_mtx_unlock(&sweet_ufs_lock);
 +		}
 +		if (!error) {
++			uint64_t shot = ++seq;
 +			struct sweet_shot_header h = {
 +				.magic = { 'S', 'W', 'E', 'E', 'T', 'S', 'H', 'T' }, .version = 1,
 +				.width = (uint32_t)v.v_width, .height = (uint32_t)v.v_height, .rowbytes = (uint32_t)v.v_rowBytes,
-+				.seq = ++seq, .secs = seq * sweet_shot_period,
++				.seq = shot, .secs = shot * sweet_shot_period,
 +			};
 +			lck_mtx_lock(&sweet_ufs_lock);
 +			bzero(bounce, UFS_BLOCK);
@@ -94,11 +95,14 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  /* Root device for rd=ufsroot0 (IOFindBSDRoot). */
  int sweet_ufs_rootdev(dev_t *dev);
  
-@@ -900,6 +900,7 @@
+@@ -900,6 +900,10 @@
  	sweet_log_start();
  	sweet_cpufreq_init();   /* raise the CPU clusters from the bootloader low default (boot-arg flamecpufreq=0 leaves them): bsd/dev/sweet_cpufreq.c */
  	sweet_sample_start();   /* console heartbeat + where the watched processes wait (boot-arg sweetsample=a,b,c; "-" = off): bsd/dev/sweet_sample.c */
-+	sweet_shot_start();     /* framebuffer snapshots (boot-arg sweetshot=SECS): bsd/dev/sweet_ufs.c */
++	{
++		extern void sweet_shot_start(void);
++		sweet_shot_start();     /* framebuffer snapshots (boot-arg sweetshot=SECS): bsd/dev/sweet_ufs.c */
++	}
  	sweet_usb_probe();      /* boot-arg sweetusb=2 (+ sweetusbdma=<low PA>) starts the USB Ethernet gadget: bsd/dev/sweet_usb.c */
  	{
  		/* sweetusbhold=N: keep the console quiet for N seconds so the USB messages stay on screen (debug) */
