@@ -12,7 +12,7 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/bonito_gpu.c
-@@ -0,0 +1,548 @@
+@@ -0,0 +1,582 @@
 +/*
 + * bonito GPU bring-up probe, stage A (boot-arg sweetgpu=1; sweetgpudelay=SECS before it starts, default 60).
 + *
@@ -433,6 +433,8 @@ new file mode 100644
 +	return true;
 +}
 +
++static void g6_stage_c2a(void);
++
 +static void
 +g6_stage_c1(void)
 +{
@@ -462,6 +464,38 @@ new file mode 100644
 +	g6_settle();
 +	printf("SWEET GPU615: C1: after settle: gx gdsc %#x (bit 31 = power on), cx_busy %#x, gmu2host_intr_info %#x\n",
 +	    g6_rd(G6_CC_PA + G6_CC_GX_GDSCR), g6_rd(G6_GMU(G6_GMU_CX_BUSY)), g6_rd(G6_GMU(0x1f992)));
++	g6_stage_c2a();
++}
++
++/* ---- stage C2a: shader power (SPTPRAC) and a first look at the GPU core ---- */
++
++static void
++g6_stage_c2a(void)
++{
++	uint32_t v0, v1;
++	bool up;
++
++	if (!(g6_rd(G6_CC_PA + G6_CC_GX_GDSCR) >> 31)) {
++		printf("SWEET GPU615: C2a: GX is not on; skipping\n");
++		return;
++	}
++	printf("SWEET GPU615: C2a: SPTPRAC power on (GMU_GX_SPTPRAC_POWER_CONTROL = 0x778000)\n");
++	g6_settle();
++	g6_gw(0x1a881, 0x778000);
++	up = g6_wait(G6_GMU(0x1f8d0), 1u << 3, true, 100);
++	printf("SWEET GPU615: C2a: sptprac status %#x (%s; bit 3 = on)\n", g6_rd(G6_GMU(0x1f8d0)), up ? "on" : "NOT on");
++
++	printf("SWEET GPU615: C2a: reading GPU core registers\n");
++	g6_settle();
++	printf("SWEET GPU615: C2a: rbbm_status %#x int_0_status %#x vbif_gx_reset_status %#x cp_rb_base %#x\n",
++	    g6_rd(G6_GMU(0x210)), g6_rd(G6_GMU(0x201)), g6_rd(G6_GMU(0x215)), g6_rd(G6_GMU(0x800)));
++	g6_settle();
++	v0 = g6_rd(G6_GMU(0x800));
++	g6_wr(G6_GMU(0x800), 0x12345000u);
++	v1 = g6_rd(G6_GMU(0x800));
++	g6_wr(G6_GMU(0x800), v0);
++	printf("SWEET GPU615: C2a: cp_rb_base write test %#x -> %#x (want 0x12345000), restored %#x\n", v0, v1,
++	    g6_rd(G6_GMU(0x800)));
 +}
 +
 +static void
