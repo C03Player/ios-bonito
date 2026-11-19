@@ -12,7 +12,7 @@ diff --git a/bsd/dev/bonito_reset.c b/bsd/dev/bonito_reset.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/bonito_reset.c
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,197 @@
 +/*
 + * Unattended restarts for the test loop (so nobody has to hold Power):
 + *
@@ -177,6 +177,13 @@ new file mode 100644
 +{
 +	int reboot = 0, wdt = 0, ptest = 0;
 +	thread_t thread;
++	static bool started;
++
++	/* Called first thing in sweet_ufs_init (the watchdog must cover the eMMC bring-up) and again at its end: once is enough. */
++	if (started) {
++		return;
++	}
++	started = true;
 +
 +	PE_parse_boot_argn("sweetreboot", &reboot, sizeof(reboot));
 +	PE_parse_boot_argn("sweetpanicreset", &rs_panic_reset, sizeof(rs_panic_reset));
@@ -206,7 +213,19 @@ new file mode 100644
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -950,6 +950,10 @@
+@@ -1009,7 +1009,11 @@
+ 	char want[64] = "userdata";
+ 	int error;
+ 	extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
+ 
++	{
++		extern void sweet_reset_start(void);
++		sweet_reset_start();      /* FIRST: the watchdog and the panic reset must already cover the eMMC bring-up below */
++	}
+ 	if (SecureDTLookupEntry(NULL, "/sweet-emmc", &node) != kSuccess ||
+ 	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
+ 	    size < 2 * sizeof(uintptr_t)) {
+@@ -1500,6 +1500,10 @@
  		extern void sweet_gpu615_start(void);
  		sweet_gpu615_start();    /* GPU bring-up probe (boot-arg sweetgpu=1): bsd/dev/bonito_gpu.c */
  	}
