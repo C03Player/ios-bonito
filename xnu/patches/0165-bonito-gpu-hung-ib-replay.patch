@@ -1,0 +1,77 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1136,7 +1136,49 @@
+  * NB the a6xx event numbers: CACHE_FLUSH_TS 0x04, PC_CCU_INVALIDATE_DEPTH 0x18, _COLOR 0x19, PC_CCU_FLUSH_DEPTH_TS 0x1c, _COLOR_TS 0x1d, LRZ_FLUSH 0x25,
+  * CACHE_INVALIDATE 0x31 (test 5 used 0x20, which is not the CCU flush: it wedges the GPU)
+  */
+-static unsigned g6_testsel, g6_testevent = 0x1d, g6_testregs = 51;
++static unsigned g6_testsel, g6_testevent = 0x1d, g6_testregs = 51, g6_testpk = 14;
++
++/*
++ * The first IB that wedged the A615 (captured by the hang dump of patch 0164, 195 dwords: six 2D blits, then context registers and events): test 21 replays
++ * its first sweetgpupk packets. Packets 0-13 only write registers; the first CP_BLIT (op 0x2c) is packet 4.
++ */
++static const uint32_t g6_hung_ib[195] = {
++	0x48b4c085, 0x00500430, 0x000080ce, 0x02300340, 0x00000010, 0x00001800,
++	0x48840502, 0x00e70000, 0x00e700c1, 0x40840104, 0x00000c00, 0x0000cd00,
++	0x00000000, 0x00000000, 0x70268000, 0x702c0001, 0x00000003, 0x48b4c085,
++	0x00500430, 0x000080c2, 0x02300680, 0x00000010, 0x00001800, 0x48840502,
++	0x00e80000, 0x00e800c1, 0x40840104, 0x00000000, 0x0000c100, 0x00000000,
++	0x00000000, 0x70268000, 0x702c0001, 0x00000003, 0x48b4c085, 0x00500430,
++	0x000080c6, 0x02300980, 0x00000010, 0x00001800, 0x48840502, 0x00e90000,
++	0x00e900c1, 0x40840104, 0x00000400, 0x0000c500, 0x00000000, 0x00000000,
++	0x70268000, 0x702c0001, 0x00000003, 0x48b4c085, 0x00500430, 0x000080ca,
++	0x02300c80, 0x00000010, 0x00001800, 0x48840502, 0x00ea0000, 0x00ea00c1,
++	0x40840104, 0x00000800, 0x0000c900, 0x00000000, 0x00000000, 0x70268000,
++	0x702c0001, 0x00000003, 0x48b4c085, 0x00500430, 0x000080ce, 0x02300f80,
++	0x00000010, 0x00001800, 0x48840502, 0x00eb0000, 0x00eb00c1, 0x40840104,
++	0x00000c00, 0x0000cd00, 0x00000000, 0x00000000, 0x70268000, 0x702c0001,
++	0x00000003, 0x48b4c085, 0x00500430, 0x000080c2, 0x023012c0, 0x00000010,
++	0x00001800, 0x48840502, 0x00ec0000, 0x00ec00c1, 0x40840104, 0x00000000,
++	0x0000c100, 0x00000000, 0x00000000, 0x70268000, 0x702c0001, 0x00000003,
++	0x48810001, 0x00000000, 0x70dc800a, 0x00008103, 0x00000000, 0x00008104,
++	0x00000000, 0x00008105, 0x00000000, 0x00008106, 0x00000000, 0x00008107,
++	0x00000000, 0x4080f002, 0x00000000, 0x086f0437, 0x48840a02, 0x00000000,
++	0x086f0437, 0x70dc0008, 0x00008890, 0x00000000, 0x000088d4, 0x00000000,
++	0x0000b4d1, 0x00000000, 0x0000b307, 0x00000000, 0x4880a101, 0x00e00000,
++	0x48880001, 0x00e00000, 0x4088d301, 0x00000000, 0x70e50001, 0x00000001,
++	0x709d0001, 0x00000000, 0x70460004, 0x0000001d, 0x00004000, 0x00000010,
++	0x00000000, 0x70460004, 0x0000001c, 0x00004000, 0x00000010, 0x00000000,
++	0x70460001, 0x00000019, 0x70460001, 0x00000018, 0x70460004, 0x00000004,
++	0x00004000, 0x00000010, 0x00000000, 0x70460001, 0x00000031, 0x40bb0801,
++	0x0007fe00, 0x70928000, 0x70268000, 0x70640001, 0x00000001, 0x70e30001,
++	0x00000000, 0x70bf8003, 0x01030000, 0x00000010, 0x00000122, 0x70bf8003,
++	0x022cc000, 0x00000010, 0x00000118, 0x709d0001, 0x00000000, 0x70460001,
++	0x00000026, 0x70438003, 0x00040000, 0x00000000, 0x00000000, 0x70460004,
++	0x0000001d, 0x00004000, 0x00000010, 0x00000000, 0x70460004, 0x0000001c,
++	0x00004000, 0x00000010, 0x00000000,
++};
++static const uint8_t g6_hung_ib_pkt[58] = { 0, 6, 9, 14, 15, 17, 23, 26, 31, 32, 34, 40, 43, 48, 49, 51, 57, 60, 65, 66, 68, 74, 77, 82, 83, 85, 91, 94, 99, 100, 102, 104, 115, 118, 121, 130, 132, 134, 136, 138, 140, 145, 150, 152, 154, 159, 161, 163, 164, 165, 167, 169, 173, 177, 179, 181, 185, 190 };   /* dword index where each packet starts */
++
+ 
+ /*
+  * The registers Turnip writes at the start of every command buffer (tu6_init_hw), as captured on the Pixel 4's A640 (ios-flame sweet_a6xx.c blit_init):
+@@ -1232,6 +1274,14 @@
+ 		EVT(0x19);
+ 		EVT_TS(g6_testevent);
+ 		break;
++	case 21: {
++		unsigned k = g6_testpk < sizeof(g6_hung_ib_pkt) ? g6_testpk : (unsigned)sizeof(g6_hung_ib_pkt);
++		unsigned end = k < sizeof(g6_hung_ib_pkt) ? g6_hung_ib_pkt[k] : (unsigned)(sizeof(g6_hung_ib) / sizeof(g6_hung_ib[0]));
++		for (n = 0; n < end && n < 160; n++) {
++			ib[n] = g6_hung_ib[n];
++		}
++		break;
++	}
+ 	case 20: {
+ 		unsigned k = g6_testregs < sizeof(g6_turnip_init) / sizeof(g6_turnip_init[0]) ? g6_testregs : (unsigned)(sizeof(g6_turnip_init) / sizeof(g6_turnip_init[0]));
+ 		EVT(0x31);
+@@ -1853,6 +1903,7 @@
+ 	PE_parse_boot_argn("sweetgputest", &g6_testsel, sizeof(g6_testsel));
+ 	PE_parse_boot_argn("sweetgpuevent", &g6_testevent, sizeof(g6_testevent));
+ 	PE_parse_boot_argn("sweetgpuregs", &g6_testregs, sizeof(g6_testregs));
++	PE_parse_boot_argn("sweetgpupk", &g6_testpk, sizeof(g6_testpk));
+ 	if (enabled >= 4) {
+ 		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
+ 	}
