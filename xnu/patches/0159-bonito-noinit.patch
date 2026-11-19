@@ -1,0 +1,34 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7009,6 +7009,30 @@
+ 	(void) memorystatus_init_at_boot_snapshot();
+ #endif /* CONFIG_MEMORYSTATUS */
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		/*
++		 * boot-arg sweetnoinit=1 (bonito): do not start launchd. The root has been mounted (so the HFS+ journal of the last hard reset is
++		 * replayed); sync it so that the journal is empty and the volume consistent, then reset. A volume in that state can be edited
++		 * offline (bonito/tools/hfsx_write.py over adb in the recovery) without iOS replaying old journal blocks over the edits.
++		 */
++		uint32_t noinit = 0;
++		extern void sweet_reset_now(const char *why);
++		if (PE_parse_boot_argn("sweetnoinit", &noinit, sizeof(noinit)) && noinit) {
++			printf("SWEET: sweetnoinit: launchd is not started; syncing the root volume, then the phone resets\n");
++			if (rootvnode != NULLVP && rootvnode->v_mount != NULL) {
++				int e = VFS_SYNC(rootvnode->v_mount, MNT_WAIT, vfs_context_current());
++				printf("SWEET: sweetnoinit: VFS_SYNC(root) = %d\n", e);
++			}
++			delay(4000000);         /* the persistent log flushes every second */
++			sweet_reset_now("sweetnoinit");
++			for (;;) {
++				delay(1000000);
++			}
++		}
++	}
++#endif
++
+ #if DEBUG || DEVELOPMENT
+ 	/* Check for boot-arg suffix first */
+ 	char launchd_suffix[64];
