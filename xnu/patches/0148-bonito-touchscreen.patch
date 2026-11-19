@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -700,7 +700,904 @@
+@@ -700,7 +700,906 @@
  		thread_deallocate(thread);
  	}
  }
@@ -375,10 +375,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	}
 +	delay(100);
 +	printf("SWEET BTOUCH: bit-bang pins: sda %d scl %d\n", bt_pin(BT_PIN_SDA), bt_pin(BT_PIN_SCL));
-+	if (!bt_pin(BT_PIN_SDA) || !bt_pin(BT_PIN_SCL)) {
-+		bt.bus_stuck = true;
-+		printf("SWEET BTOUCH: an I2C line is held low (touch IC unpowered or hung); an ACK now would be meaningless\n");
-+	}
++
 +}
 +
 +static void
@@ -692,6 +689,11 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		bt.bb = true;
 +		bt.dead = false;
 +		bb_setup();
++		/* A line held low means an unpowered or hung IC; an ACK read from such a bus would be meaningless. */
++		bt.bus_stuck = !bt_pin(BT_PIN_SDA) || !bt_pin(BT_PIN_SCL);
++		if (bt.bus_stuck) {
++			printf("SWEET BTOUCH: an I2C line is held low (touch IC unpowered or hung)\n");
++		}
 +		err = bt.bus_stuck ? ENXIO : bt_rmi_write(0xff, 0);
 +		if (err) {
 +			printf("SWEET BTOUCH: bit-banged I2C: no answer from %#x either (err %d); scanning\n", BT_ADDR, err);

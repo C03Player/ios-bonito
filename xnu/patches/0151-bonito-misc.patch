@@ -12,7 +12,7 @@ diff --git a/bsd/dev/bonito_misc.c b/bsd/dev/bonito_misc.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/bonito_misc.c
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,226 @@
 +/*
 + * bonito small system features (each controlled by a boot-arg):
 + *
@@ -214,20 +214,18 @@ new file mode 100644
 +sweet_misc_start(void)
 +{
 +	int freq = 0, bench = 0;
-+	unsigned long long epoch = 0;
-+	char buf[32];
++	uint32_t epoch = 0;
 +	thread_t thread;
 +
 +	PE_parse_boot_argn("sweetcpufreq", &freq, sizeof(freq));
 +	PE_parse_boot_argn("sweetcpubench", &bench, sizeof(bench));
-+	if (PE_parse_boot_argn("sweettime", buf, sizeof(buf))) {
-+		for (const char *p = buf; *p >= '0' && *p <= '9'; p++) {
-+			epoch = epoch * 10 + (unsigned)(*p - '0');
-+		}
-+	}
-+	if (epoch > 1500000000ull) {
++	/* A boot-arg that looks like a number is parsed as an integer (a text buffer would receive its binary value). */
++	PE_parse_boot_argn("sweettime", &epoch, sizeof(epoch));
++	if (epoch > 1500000000u) {
 +		clock_set_calendar_microtime((clock_sec_t)epoch, 0);
-+		printf("SWEET MISC: calendar set to %llu\n", epoch);
++		printf("SWEET MISC: calendar set to %u\n", epoch);
++	} else if (epoch) {
++		printf("SWEET MISC: sweettime=%u is not a plausible time\n", epoch);
 +	}
 +	if (freq || bench) {
 +		misc_cpufreq((unsigned)freq);
