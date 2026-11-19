@@ -1,0 +1,69 @@
+name: userland-gpu
+
+# The iOS-side GPU stack for bonito: Mesa Turnip (Adreno Vulkan, darwin kernel backend) + the metal2vulkan bridge + SweetMetal2.bundle
+# (the Metal device backboardd loads when the kernel publishes IOAcceleratorES with boot-arg sweetmtl=2). Sources and licences:
+# bonito/userland/README.md. Output: artifact "userland-gpu" (SweetMetal2.bundle, vktest, m2vtest).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "bonito/userland/**"
+      - ".github/workflows/userland.yml"
+
+concurrency:
+  group: userland-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deps
+        run: |
+          brew install jq ninja meson glslang bison flex llvm
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          python3 -m venv bonito/userland/work/turnip/venv
+          bonito/userland/work/turnip/venv/bin/pip install --quiet mako pyyaml packaging meson
+          rustup toolchain install 1.98.0 --profile minimal --target aarch64-apple-ios
+          cargo +1.98.0 --version
+
+      - name: Sources
+        run: sh bonito/userland/setup-sources.sh
+
+      - name: Turnip for iOS
+        run: sh bonito/userland/tools/build-turnip-ios.sh
+
+      - name: metal2vulkan bridge
+        run: sh bonito/userland/tools/build-m2v-bridge.sh
+
+      - name: SweetMetal2.bundle and tests
+        run: |
+          sh bonito/userland/phone/metal2/build.sh
+          sh bonito/userland/phone/turnip/build.sh
+
+      - name: Pack
+        run: |
+          cd bonito/userland
+          mkdir -p ../../out-userland
+          COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf ../../out-userland/SweetMetal2.bundle.tar.gz -C phone/metal2/out SweetMetal2.bundle
+          cp phone/metal2/out/m2vtest ../../out-userland/
+          cp phone/turnip/out/vktest phone/turnip/out/libvulkan_freedreno.dylib ../../out-userland/
+          ls -la ../../out-userland
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: userland-gpu
+          path: out-userland
+          retention-days: 14
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          for f in bonito/userland/work/turnip/configure-ios.log bonito/userland/work/turnip/build-ios.log bonito/userland/work/m2v-bridge/build-ios.log; do
+            [ -f "$f" ] && { echo "=== $f"; tail -60 "$f"; }
+          done; true

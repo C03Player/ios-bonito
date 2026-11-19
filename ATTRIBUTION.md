@@ -28,3 +28,10 @@ with MACHINE_CONFIG=SWEET to prove the pipeline; bonito patches (0125+) are not 
 `bonito/tools/mkiosroot.sh` (ios-flame @ 745c4341, derived from ios-sweet, MIT) and `bonito/tools/sweet-root-tweaks.py` (ios-sweet @ 45263bee, MIT).
 `bonito/tools/build-ios-root.sh` is new: it drives them (verify IPSW, extract the OS/SystemOS/AppOS images, build, tweak, fsck). apfs-fuse (sgan81, GPL-3.0)
 is built from source at 66b86bd and never redistributed; no Apple files are in the repository.
+
+## Userland GPU stack (bonito/userland)
+Copied from NWylynko/ios-flame @ 745c4341 (MIT, Copyright (c) 2026 dipa-studio / ios-flame contributors): `phone/metal2` (SweetMetal2.mm, NativeBridgeMetalFrontend.*,
+bridge/ with UniXNU's NativeMetalBridge.rs/NativeMetalObjects.* (MIT) and the metal2vulkan patches), `phone/turnip` (NativeAdrenoABI.h from UniXNU, tests, one Mesa
+patch), `tools/build-turnip-ios.sh`, `tools/build-m2v-bridge.sh`. Fetched at CI build time and never committed: UniXNU/UniXNU 31506f7e (patch list, Mesa pin,
+`patches/mesa`; BSD-2-Clause-Patent), Mesa 85fda3b36405bcaea8bffc64aa4f2651dc90770d (MIT), steelbrain/metal2vulkan 720ef1ce9ae2a2068999a8675717418b9416283e
+(GPL-2.0-or-later OR LGPL-3.0-or-later; the built bridge links it, so the resulting bundle is not redistributed from this repository without that licence).
