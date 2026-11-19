@@ -1,7 +1,7 @@
 diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 --- a/osfmk/kern/exception.c
 +++ b/osfmk/kern/exception.c
-@@ -1000,6 +1000,154 @@
+@@ -1000,6 +1000,169 @@
   */
  void sweet_sample_task(const char *name, int pid, task_t task);
  
@@ -56,6 +56,7 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +	extern void CleanPoC_Dcache(void);
 +	extern unsigned int cpu_broadcast_xcall_simple(boolean_t, void (*)(void *), void *);
 +	time_value_t ut, st, ut2, st2;
++	uint64_t l3_kva = 0;
 +	uint64_t far = const_saved_state64(ss)->far, pc = get_saved_state_pc(ss);
 +	extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
 +
@@ -75,11 +76,13 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +		uint64_t idx[3] = { (far >> 36) & 0x7ff, (far >> 25) & 0x7ff, (far >> 14) & 0x7ff };
 +		uint64_t pa = pm->ttep, desc[3] = { 0, 0, 0 };
 +		int lv;
++		l3_kva = 0;
 +		for (lv = 0; lv < 3; lv++) {
 +			if (pa < 0x80000000ull || pa >= 0x200000000ull || (pa & 0x3fff)) {
 +				break;
 +			}
 +			desc[lv] = *(volatile uint64_t *)(phystokv(pa) + idx[lv] * 8);
++			l3_kva = (uint64_t)(phystokv(pa) + idx[lv] * 8);
 +			if ((desc[lv] & 3) != 3 || lv == 2) {
 +				break;
 +			}
@@ -97,8 +100,20 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +	}
 +	printf("SMP %s t%d tlbi test: pmap has pa 0x%llx for far 0x%llx; %s\n", name, tn,
 +	    (unsigned long long)ptoa_64(pmap_find_phys(get_task_pmap(task), (addr64_t)far)), (unsigned long long)far,
++	    enabled == 4 ? "rewriting the descriptor (break before make)" : enabled == 3 ? "cleaning the descriptor's cache line" :
 +	    enabled == 2 ? "cleaning the data caches of every CPU" : "flushing all TLBs");
-+	if (enabled == 2) {
++	if (enabled == 3 && l3_kva) {
++		/* clean+invalidate just the cache line holding the descriptor (by address, to the point of coherency), then flush the TLBs */
++		__asm__ volatile ("dsb sy; dc civac, %0; dsb sy; tlbi vmalle1is; dsb ish; isb" :: "r" (l3_kva) : "memory");
++	} else if (enabled == 4 && l3_kva) {
++		/* break before make: invalid, flush, the same descriptor again, flush */
++		volatile uint64_t *p = (volatile uint64_t *)l3_kva;
++		uint64_t old = *p;
++		*p = 0;
++		__asm__ volatile ("dsb ishst; tlbi vmalle1is; dsb ish; isb" ::: "memory");
++		*p = old;
++		__asm__ volatile ("dsb ishst; dc civac, %0; dsb sy; tlbi vmalle1is; dsb ish; isb" :: "r" (l3_kva) : "memory");
++	} else if (enabled == 2) {
 +		(void)cpu_broadcast_xcall_simple(TRUE, (void (*)(void *))CleanPoC_Dcache, NULL);
 +	} else {
 +		__asm__ volatile ("dsb ishst; tlbi vmalle1is; dsb ish; isb" ::: "memory");
@@ -156,7 +171,7 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
  void
  sweet_sample_task(const char *name, int pid, task_t task)
  {
-@@ -1040,6 +1188,29 @@
+@@ -1040,6 +1203,29 @@
  			fp = frame[0];
  		}
  		printf("%s\n", line);
