@@ -1,0 +1,293 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -446,5 +446,273 @@
+ 	return ENOENT;
+ }
++
++/*
++ * HS200 (200 MHz, 8-bit SDR), boot-arg sweeths200=1 (default off). Qualcomm SDCC5 (sdhci-msm.c, msm_init_cm_dll /
++ * msm_config_cm_dll_phase / msm_find_most_appropriate_phase / sdhci_msm_execute_tuning): the host samples read data through a
++ * DLL whose output phase is found by sending the tuning block (CMD21, 128 bytes on an 8-bit bus) at each of 16 phases.
++ * Safety: 16 MiB of the eMMC (outside the root) are read and hashed at 50 MHz first and must read back identical at HS200,
++ * three times; any failure makes the caller start over at high speed. Vendor registers are at the hc base (v5 layout).
++ */
++#define MSM_DLL_CONFIG  0x200
++#define MSM_DLL_STATUS  0x208
++#define MSM_DLL_CONFIG2 0x254
++#define MSM_DLL_USR_CTL 0x388
++#define MSM_VERSION     0x318
++#define SD_HCTL2        0x3e
++#define DLL_EN          (1u << 16)
++#define DLL_CDR_EN      (1u << 17)
++#define DLL_CK_OUT_EN   (1u << 18)
++#define DLL_CDR_EXT_EN  (1u << 19)
++#define DLL_PDN         (1u << 29)
++#define DLL_RST         (1u << 30)
++#define DLL_LOCK        (1u << 7)
++#define DLL2_FLL_CYCLE  (1u << 18)
++#define DLL2_CLK_DIS    (1u << 21)
++#define HS200_HZ        200000000u
++#define HS200_LBA       0x400000u               /* 2 GiB into the eMMC: Android partitions, never written here */
++#define HS200_CHUNKS    16u
++
++static bool emmc_hs200_failed;
++
++static uint64_t
++hs200_hash(const void *p, size_t len)
++{
++	const uint64_t *w = (const uint64_t *)p;
++	uint64_t h = 0xcbf29ce484222325ull;
++	for (size_t i = 0; i < len / 8; i++) {
++		h ^= w[i];
++		h *= 0x100000001b3ull;
++		h = (h << 13) | (h >> 51);
++	}
++	return h;
++}
++
++static int
++hs200_read_hash(uint32_t chunk, uint64_t *h)
++{
++	int e = ufs_read_blocks(HS200_LBA + (uint64_t)chunk * (BOUNCE_SIZE / UFS_BLOCK), BOUNCE_SIZE / UFS_BLOCK);
++	if (!e) {
++		*h = hs200_hash((const void *)(su.dma + DMA_BOUNCE), BOUNCE_SIZE);
++	}
++	return e;
++}
++
++static bool
++hs200_wait_ck(bool want)
++{
++	for (int i = 0; i < 1000; i++) {
++		if (!!(sd_rd32(MSM_DLL_CONFIG) & DLL_CK_OUT_EN) == want) {
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static bool
++hs200_set_phase(unsigned phase)
++{
++	static const uint8_t grey[16] = { 0x0, 0x1, 0x3, 0x2, 0x6, 0x7, 0x5, 0x4, 0xc, 0xd, 0xf, 0xe, 0xa, 0xb, 0x9, 0x8 };
++	uint32_t c = sd_rd32(MSM_DLL_CONFIG);
++	c &= ~(DLL_CDR_EN | DLL_CK_OUT_EN);
++	c |= DLL_CDR_EXT_EN | DLL_EN;
++	sd_wr32(MSM_DLL_CONFIG, c);
++	if (!hs200_wait_ck(false)) {
++		return false;
++	}
++	sd_wr32(MSM_DLL_CONFIG, (sd_rd32(MSM_DLL_CONFIG) & ~(0xfu << 20)) | ((uint32_t)grey[phase] << 20));
++	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) | DLL_CK_OUT_EN);
++	if (!hs200_wait_ck(true)) {
++		return false;
++	}
++	c = sd_rd32(MSM_DLL_CONFIG);
++	c |= DLL_CDR_EN;
++	c &= ~DLL_CDR_EXT_EN;
++	sd_wr32(MSM_DLL_CONFIG, c);
++	return true;
++}
++
++static void
++hs200_dll_freq(void)
++{
++	/* MCLK_FREQ field (bits 26:24) for a 187..208 MHz clock is 7 */
++	sd_wr32(MSM_DLL_CONFIG, (sd_rd32(MSM_DLL_CONFIG) & ~(7u << 24)) | (7u << 24));
++}
++
++static bool
++hs200_dll_init(void)
++{
++	uint32_t ver = sd_rd32(MSM_VERSION), major = ver >> 28, minor = (ver >> 16) & 0xfff;
++	bool upd = major == 1 && minor >= 0x42, userctl = major == 1 && minor >= 0x71;
++
++	printf("SWEET EMMC: SDCC version %#x (major %u minor %#x): updated DLL reset %d, DLL user control %d\n", ver, major,
++	    minor, upd, userctl);
++	if (upd) {
++		sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) & ~DLL_CK_OUT_EN);
++		sd_wr32(MSM_DLL_CONFIG2, sd_rd32(MSM_DLL_CONFIG2) | DLL2_CLK_DIS);
++	}
++	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) | DLL_RST);
++	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) | DLL_PDN);
++	hs200_dll_freq();
++	if (upd) {
++		uint32_t mclk = (sd_rd32(MSM_DLL_CONFIG2) & DLL2_FLL_CYCLE) ? (HS200_HZ / 19200000u) * 8 : (HS200_HZ / 19200000u) * 4;
++		sd_wr32(MSM_DLL_CONFIG2, (sd_rd32(MSM_DLL_CONFIG2) & ~(0xffu << 10)) | (mclk << 10));
++		delay(5);
++	}
++	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) & ~DLL_RST);
++	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) & ~DLL_PDN);
++	if (upd) {
++		hs200_dll_freq();
++		sd_wr32(MSM_DLL_CONFIG2, sd_rd32(MSM_DLL_CONFIG2) & ~DLL2_CLK_DIS);
++	}
++	if (userctl) {
++		sd_wr32(MSM_DLL_USR_CTL, 0x10800u | (1u << 26));
++	}
++	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) | DLL_EN);
++	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) | DLL_CK_OUT_EN);
++	for (int i = 0; i < 100; i++) {
++		if (sd_rd32(MSM_DLL_STATUS) & DLL_LOCK) {
++			return true;
++		}
++		delay(1);
++	}
++	printf("SWEET EMMC: DLL did not lock (status %#x)\n", sd_rd32(MSM_DLL_STATUS));
++	return false;
++}
++
++/* CMD21 (SEND_TUNING_BLOCK_HS200): 128 bytes on an 8-bit bus; 0 if the JEDEC pattern came back. */
++static int
++hs200_tune_cmd(void)
++{
++	static const uint32_t pattern[32] = {
++		0xFF00FFFF, 0x0000FFFF, 0xCCCCFFFF, 0xCCCC33CC, 0xCC3333CC, 0xFFFFCCCC, 0xFFFFEEFF, 0xFFEEEEFF,
++		0xFFDDFFFF, 0xDDDDFFFF, 0xBBFFFFFF, 0xBBFFFFFF, 0xFFFFFFBB, 0xFFFFFF77, 0x77FF7777, 0xFFEEDDBB,
++		0x00FFFFFF, 0x00FFFFFF, 0xCCFFFF00, 0xCC33CCCC, 0x3333CCCC, 0xFFCCCCCC, 0xFFEEFFFF, 0xEEEEFFFF,
++		0xDDFFFFFF, 0xDDFFFFFF, 0xFFFFFFDD, 0xFFFFFFBB, 0xFFFFBBBB, 0xFFFF77FF, 0xFF7777FF, 0xEEDDBB77,
++	};
++	volatile uint32_t *d = (volatile uint32_t *)(su.dma + DMA_DESC);
++	memset((void *)(su.dma + DMA_BOUNCE), 0, 128);
++	*d++ = 0x23u | (128u << 16);
++	*d++ = (uint32_t)(su.dma_pa + DMA_BOUNCE);
++	sd_barrier();
++	sd_wr32(SD_ADMA_ADDR, (uint32_t)(su.dma_pa + DMA_DESC));
++	sd_wr8(SD_HCTL, (uint8_t)((sd_rd8(SD_HCTL) & ~0x18) | 0x10));
++	sd_wr16(SD_BLK, 128);
++	sd_wr16(SD_BLK + 2, 1);
++	sd_wr16(SD_TOUT, 0xe);
++	if (!sd_wait32(SD_PRES, 3, 0, 100ull * NSEC_PER_MSEC)) {
++		return -10;
++	}
++	sd_wr32(SD_INT, 0xffffffff);
++	sd_wr32(SD_ARG, 0);
++	sd_barrier();
++	sd_wr32(SD_CMD, (21u << 24) | (CF(R_48, 1, 1, 1) << 16) | 0x11);
++	int e = emmc_wait_tc(200ull * NSEC_PER_MSEC);
++	if (e) {
++		return e;
++	}
++	return memcmp((const void *)(su.dma + DMA_BOUNCE), pattern, 128) ? -30 : 0;
++}
++
++/* Centre (3/4 into the longest run, as sdhci-msm does) of the good phases; runs wrap from 15 to 0. -1 if there is none. */
++static int
++hs200_pick_phase(uint32_t good)
++{
++	int best_len = 0, best_start = 0;
++	for (int s = 0; s < 16; s++) {
++		if (!(good & (1u << s)) || (good & (1u << ((s + 15) & 15)))) {
++			continue;       /* not the start of a run */
++		}
++		int len = 0;
++		while (len < 16 && (good & (1u << ((s + len) & 15)))) {
++			len++;
++		}
++		if (len > best_len) {
++			best_len = len;
++			best_start = s;
++		}
++	}
++	if (good == 0xffffu) {
++		return 8;
++	}
++	if (best_len < 3) {
++		return -1;
++	}
++	int i = (best_len * 3) / 4;
++	if (i) {
++		i--;
++	}
++	return (best_start + i) & 15;
++}
++
++static int
++emmc_hs200(void)
++{
++	static uint64_t base[HS200_CHUNKS];
++	uint32_t good = 0, i;
++	int e;
++
++	for (i = 0; i < HS200_CHUNKS; i++) {
++		if (hs200_read_hash(i, &base[i])) {
++			printf("SWEET EMMC: HS200: baseline read failed\n");
++			return -1;
++		}
++	}
++	e = emmc_switch(185, 2);                                /* HS_TIMING = HS200, still at 50 MHz */
++	if (e) {
++		printf("SWEET EMMC: HS200: the card refused HS_TIMING=2 (%d)\n", e);
++		return -2;
++	}
++	sd_wr16(SD_CLK, 0);                                     /* clock off while the source and the signalling change */
++	gcc_wr(GCC_CFG_RCGR, (1u << 8) | (2 * 3 - 1));          /* GPLL0 600 MHz / 3 = 200 MHz */
++	gcc_wr(GCC_CMD_RCGR, 0x3);
++	for (i = 0; i < 1000 && (gcc_rd(GCC_CMD_RCGR) & 1); i++) {
++		delay(10);
++	}
++	if (gcc_rd(GCC_CMD_RCGR) & 1) {
++		printf("SWEET EMMC: HS200: GCC clock update stuck\n");
++		return -3;
++	}
++	sd_wr16(SD_HCTL2, (uint16_t)((sd_rd16(SD_HCTL2) & ~7u) | 3u | 8u));    /* SDR104 mode (HS200), 1.8 V signalling */
++	emmc_pwr_ack();
++	delay(5000);
++	if (emmc_set_clock(0)) {                                /* divider 0: the 200 MHz base clock */
++		printf("SWEET EMMC: HS200: internal clock not stable\n");
++		return -4;
++	}
++	if (!hs200_dll_init()) {
++		return -5;
++	}
++	for (i = 0; i < 16; i++) {
++		if (!hs200_set_phase(i)) {
++			printf("SWEET EMMC: HS200: DLL phase %u would not set\n", i);
++			return -6;
++		}
++		e = hs200_tune_cmd();
++		if (e) {
++			delay(2000);
++		} else {
++			good |= 1u << i;
++		}
++	}
++	int phase = hs200_pick_phase(good);
++	printf("SWEET EMMC: HS200 tuning: good phases %#06x -> phase %d\n", good, phase);
++	if (phase < 0 || !hs200_set_phase((unsigned)phase)) {
++		return -7;
++	}
++	for (int rep = 0; rep < 3; rep++) {
++		for (i = 0; i < HS200_CHUNKS; i++) {
++			uint64_t h = 0;
++			if (hs200_read_hash(i, &h) || h != base[i]) {
++				printf("SWEET EMMC: HS200: verification pass %d chunk %u %s\n", rep, i, h ? "differs" : "failed");
++				return -8;
++			}
++		}
++	}
++	printf("SWEET EMMC: HS200 active: 8-bit, 200 MHz, phase %d, 16 MiB verified three times\n", phase);
++	return 0;
++}
++
+ 
+ static int
+ ufs_take_over_host(void)
+@@ -523,6 +791,15 @@
+ 		sd_wr8(SD_HCTL, sd_rd8(SD_HCTL) | 0x20);
+ 		delay(2000);
+ 		printf("SWEET EMMC: 8-bit high speed, 50 MHz\n");
++		{
++			int want_hs200 = 0;
++			PE_parse_boot_argn("sweeths200", &want_hs200, sizeof(want_hs200));
++			if (want_hs200 && !emmc_hs200_failed && emmc_hs200()) {
++				printf("SWEET EMMC: HS200 failed; starting over at high speed\n");
++				emmc_hs200_failed = true;
++				return ufs_take_over_host();
++			}
++		}
+ 	} else {
+ 		printf("SWEET EMMC: staying at 1-bit 400 kHz (switch error %d)\n", e);
+ 	}
