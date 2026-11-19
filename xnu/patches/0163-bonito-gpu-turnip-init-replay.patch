@@ -1,0 +1,66 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1136,7 +1136,24 @@
+  * NB the a6xx event numbers: CACHE_FLUSH_TS 0x04, PC_CCU_INVALIDATE_DEPTH 0x18, _COLOR 0x19, PC_CCU_FLUSH_DEPTH_TS 0x1c, _COLOR_TS 0x1d, LRZ_FLUSH 0x25,
+  * CACHE_INVALIDATE 0x31 (test 5 used 0x20, which is not the CCU flush: it wedges the GPU)
+  */
+-static unsigned g6_testsel, g6_testevent = 0x1d;
++static unsigned g6_testsel, g6_testevent = 0x1d, g6_testregs = 51;
++
++/*
++ * The registers Turnip writes at the start of every command buffer (tu6_init_hw), as captured on the Pixel 4's A640 (ios-flame sweet_a6xx.c blit_init):
++ * test 20 replays the first sweetgpuregs of them after CACHE_INVALIDATE, SP_UPDATE_CNTL and a WAIT_FOR_IDLE, so a bisection finds the write that wedges the A615.
++ */
++static const uint32_t g6_turnip_init[][2] = {
++	{ 0x9804, 0x1f }, { 0x9805, 1 }, { 0xa0f8, 1 }, { 0xb600, 0x8000 }, { 0x8600, 0 },
++	{ 0xae03, 0x420 }, { 0xae00, 0 }, { 0xbe04, 0 }, { 0x9600, 0x2000000 }, { 0x0e12, 1 },
++	{ 0x8e01, 1 }, { 0x8e04, 0x4100000 }, { 0xae04, 0 }, { 0xae0f, 0x3f }, { 0xb605, 0x44 },
++	{ 0xbe00, 0x80 }, { 0xbe01, 0 }, { 0xab20, 0 }, { 0xb182, 0 }, { 0xbb11, 0 }, { 0xa9a8, 0 },
++	{ 0xab00, 5 }, { 0xa009, 3 }, { 0x8811, 0x10 }, { 0x8110, 0 }, { 0x8818, 0 }, { 0x8819, 0 },
++	{ 0x881a, 0 }, { 0x881b, 0 }, { 0x881c, 0 }, { 0x881d, 0 }, { 0x881e, 0 }, { 0x88f0, 0 },
++	{ 0x9236, 0 }, { 0x9300, 0 }, { 0x9306, 1 }, { 0xb183, 0 }, { 0x80af, 0 }, { 0x8099, 0 },
++	{ 0x980a, 0 }, { 0x9210, 0 }, { 0x9211, 0 }, { 0x9602, 0 }, { 0x9e72, 0 }, { 0xb309, 0xa2 },
++	{ 0xb986, 0xfc }, { 0xa007, 0 }, { 0x8864, 0 }, { 0xb800, 0x102 },
++	{ 0x8e07, 0x10000000 },
++};
+ 
+ static unsigned
+ g6_test_ib(unsigned sel, uint32_t *ib, uint64_t ts_va)
+@@ -1215,6 +1232,19 @@
+ 		EVT(0x19);
+ 		EVT_TS(g6_testevent);
+ 		break;
++	case 20: {
++		unsigned k = g6_testregs < sizeof(g6_turnip_init) / sizeof(g6_turnip_init[0]) ? g6_testregs : (unsigned)(sizeof(g6_turnip_init) / sizeof(g6_turnip_init[0]));
++		EVT(0x31);
++		ib[n++] = 0x40000000u | 1u | (g6_parity(1) << 7) | (0xbb08u << 8) | (g6_parity(0xbb08u) << 27);
++		ib[n++] = 0xfffffu;
++		ib[n++] = g6_pkt7(G6_CP_WAIT_FOR_IDLE, 0);
++		for (unsigned i = 0; i < k; i++) {
++			uint32_t reg = g6_turnip_init[i][0];
++			ib[n++] = 0x40000000u | 1u | (g6_parity(1) << 7) | (reg << 8) | (g6_parity(reg) << 27);
++			ib[n++] = g6_turnip_init[i][1];
++		}
++		break;
++	}
+ 	default:
+ 		break;
+ 	}
+@@ -1496,7 +1526,7 @@
+ 		int rc;
+ 
+ 		(void)tsleep(&g6_chan, PZERO, "g6idle", hz * 15);
+-		uint32_t tib[24], tn = 0;
++		uint32_t tib[160], tn = 0;
+ 
+ 		if (n == 1 && g6_testsel) {
+ 			tn = g6_test_ib(g6_testsel, tib, G6_GVA_POOL + G6_OFF_SCRATCH + 0x40);
+@@ -1822,6 +1852,7 @@
+ 	PE_parse_boot_argn("sweetgpufast", &g6_fast, sizeof(g6_fast));
+ 	PE_parse_boot_argn("sweetgputest", &g6_testsel, sizeof(g6_testsel));
+ 	PE_parse_boot_argn("sweetgpuevent", &g6_testevent, sizeof(g6_testevent));
++	PE_parse_boot_argn("sweetgpuregs", &g6_testregs, sizeof(g6_testregs));
+ 	if (enabled >= 4) {
+ 		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
+ 	}
