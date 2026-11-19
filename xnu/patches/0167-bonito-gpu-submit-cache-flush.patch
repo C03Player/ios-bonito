@@ -1,0 +1,22 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1409,10 +1409,16 @@
+ 	g6_submit_count++;
+ 	g6_last_ib_va = ib_iova;
+ 	g6_last_ib_dw = dwords;
++	/*
++	 * The submit wrapper of Linux's a6xx_submit (patch 0167): CCU invalidates in front, and the fence written by a CACHE_FLUSH_TS event, which flushes the GPU's
++	 * caches (UCHE, CCU) to memory first. A WAIT_FOR_IDLE and a plain CP_MEM_WRITE (what this was before) signal the fence while the GPU's writes still sit in
++	 * its caches: the CPU then reads stale memory (vktest's fill and copy came back 74 % wrong).
++	 */
+ 	uint32_t dw[] = {
++		g6_pkt7(0x46, 1), 0x18,                         /* PC_CCU_INVALIDATE_DEPTH */
++		g6_pkt7(0x46, 1), 0x19,                         /* PC_CCU_INVALIDATE_COLOR */
+ 		g6_pkt7(0x3f, 3), (uint32_t)ib_iova, (uint32_t)(ib_iova >> 32), dwords,
+-		g6_pkt7(G6_CP_WAIT_FOR_IDLE, 0),
+-		g6_pkt7(G6_CP_MEM_WRITE, 3), (uint32_t)fva, (uint32_t)(fva >> 32), fence,
++		g6_pkt7(0x46, 4), 0x04, (uint32_t)fva, (uint32_t)(fva >> 32), fence,       /* CACHE_FLUSH_TS */
+ 	};
+ 	rc = g6_ring(dw, sizeof(dw) / 4, NULL, timeout_ms);
+ 	g6_pread(G6_OFF_SCRATCH + 0x10, &got, 4);
