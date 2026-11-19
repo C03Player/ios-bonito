@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
 --- a/bsd/dev/bonito_gpu.c
 +++ b/bsd/dev/bonito_gpu.c
-@@ -1303,6 +1303,280 @@
+@@ -1303,6 +1303,283 @@
  	}
  }
  
@@ -48,6 +48,9 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
 +	}
 +	printf("SWEET GPU615: no contiguous user pool (userland buffers will be refused)\n");
 +}
++
++/* the fitted display rectangle SweetFramebuffer publishes for the touch mapping (defined by the Pixel 4 GPU file otherwise) */
++int sweet_display_fit_x, sweet_display_fit_y, sweet_display_fit_w, sweet_display_fit_h;
 +
 +void
 +sweet_gpu_init(void)
@@ -282,7 +285,7 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
  void
  sweet_gpu615_start(void)
  {
-@@ -1320,6 +1594,14 @@
+@@ -1320,6 +1597,14 @@
  	PE_parse_boot_argn("sweetgpufast", &g6_fast, sizeof(g6_fast));
  	if (enabled >= 4) {
  		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
