@@ -78,7 +78,7 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
  void
  sweet_sample_task(const char *name, int pid, task_t task)
  {
-@@ -1040,6 +1110,23 @@
+@@ -1040,6 +1110,28 @@
  			fp = frame[0];
  		}
  		printf("%s\n", line);
@@ -98,6 +98,11 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +			    thread->base_pri, thread->last_processor != PROCESSOR_NULL ? (int)thread->last_processor->cpu_id : -1,
 +			    (unsigned long long)thread->last_run_time, (unsigned long long)mach_absolute_time());
 +		}
++		/* the last user fault: a thread that keeps faulting at one address shows the same far/esr in every sample (EC 0x20/0x21 instruction
++		 * abort, 0x24/0x25 data abort; the low bits of ISS say translation/access/permission fault) */
++		printf("SMP %s t%d last exception: far 0x%llx esr 0x%x (EC 0x%x) pc 0x%llx\n", name, tn - 1,
++		    (unsigned long long)const_saved_state64(ss)->far, (unsigned)const_saved_state64(ss)->esr,
++		    (unsigned)(const_saved_state64(ss)->esr >> 26), (unsigned long long)get_saved_state_pc(ss));
 +		sweet_sample_kstack(thread);
  	}
  	task_unlock(task);
