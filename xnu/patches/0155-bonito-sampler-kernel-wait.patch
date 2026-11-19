@@ -1,7 +1,7 @@
 diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 --- a/osfmk/kern/exception.c
 +++ b/osfmk/kern/exception.c
-@@ -1000,6 +1000,169 @@
+@@ -1000,6 +1000,199 @@
   */
  void sweet_sample_task(const char *name, int pid, task_t task);
  
@@ -49,6 +49,23 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 + * last exception is a user write with a level 3 translation fault at an address the pmap says it has mapped. Print the physical
 + * page the pmap has for that address, flush all TLBs (tlbi vmalle1is), wait one second and show whether the thread moved on.
 + */
++static uint64_t sweet_xc_va;
++
++/* runs ON the stuck CPU (cross call): clean+invalidate its own copy of the cache line with the descriptor, drop its TLB entries */
++static void
++sweet_xc_civac(__unused void *arg)
++{
++	__asm__ volatile ("dsb sy; dc civac, %0; dsb sy; tlbi vmalle1; dsb nsh; isb" :: "r" (sweet_xc_va) : "memory");
++}
++
++static void
++sweet_xc_flush_all(__unused void *arg)
++{
++	extern void FlushPoC_Dcache(void);
++	FlushPoC_Dcache();
++	__asm__ volatile ("dsb sy; tlbi vmalle1; dsb nsh; isb" ::: "memory");
++}
++
 +static void
 +sweet_sample_tlbi_test(task_t task, thread_t thread, arm_saved_state_t *ss, const char *name, int tn)
 +{
@@ -100,9 +117,22 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +	}
 +	printf("SMP %s t%d tlbi test: pmap has pa 0x%llx for far 0x%llx; %s\n", name, tn,
 +	    (unsigned long long)ptoa_64(pmap_find_phys(get_task_pmap(task), (addr64_t)far)), (unsigned long long)far,
++	    enabled == 6 ? "dc civac of the descriptor on the stuck CPU" : enabled == 5 ? "flushing (clean+invalidate) every CPU's data cache" :
 +	    enabled == 4 ? "rewriting the descriptor (break before make)" : enabled == 3 ? "cleaning the descriptor's cache line" :
 +	    enabled == 2 ? "cleaning the data caches of every CPU" : "flushing all TLBs");
-+	if (enabled == 3 && l3_kva) {
++	if (enabled == 5) {
++		/* clean AND invalidate the data cache on every CPU, the stuck one included */
++		(void)cpu_broadcast_xcall_simple(TRUE, sweet_xc_flush_all, NULL);
++	} else if (enabled == 6 && l3_kva && thread->last_processor != PROCESSOR_NULL) {
++		/* invalidate the descriptor's line in the stuck CPU's own caches */
++		int cpu = (int)thread->last_processor->cpu_id;
++		sweet_xc_va = l3_kva;
++		if (cpu == (int)cpu_number()) {
++			sweet_xc_civac(NULL);
++		} else {
++			(void)cpu_xcall(cpu, sweet_xc_civac, NULL);
++		}
++	} else if (enabled == 3 && l3_kva) {
 +		/* clean+invalidate just the cache line holding the descriptor (by address, to the point of coherency), then flush the TLBs */
 +		__asm__ volatile ("dsb sy; dc civac, %0; dsb sy; tlbi vmalle1is; dsb ish; isb" :: "r" (l3_kva) : "memory");
 +	} else if (enabled == 4 && l3_kva) {
@@ -171,7 +201,7 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
  void
  sweet_sample_task(const char *name, int pid, task_t task)
  {
-@@ -1040,6 +1203,29 @@
+@@ -1040,6 +1233,29 @@
  			fp = frame[0];
  		}
  		printf("%s\n", line);
