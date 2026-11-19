@@ -102,7 +102,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +static bool
 +hs200_dll_init(void)
 +{
-+	uint32_t ver = sd_rd32(MSM_VERSION), major = ver >> 28, minor = (ver >> 16) & 0xfff;
++	uint32_t ver = sd_rd32(MSM_VERSION), major = ver >> 28, minor = ver & 0xff;
 +	bool upd = major == 1 && minor >= 0x42, userctl = major == 1 && minor >= 0x71;
 +
 +	printf("SWEET EMMC: SDCC version %#x (major %u minor %#x): updated DLL reset %d, DLL user control %d\n", ver, major,
