@@ -84,3 +84,11 @@ shareable as XNU sets it, AttrIdx 0, PXN/UXN 1/1, nG 1, OA 0x10a6fc000). The CPU
 above 4 GiB (0x1_0000_0000+): the stalls could be tied to pages from the upper half of DRAM (not proven: no sample of a healthy fault to compare).
 Experiments `sweetsampletlbi=3` (dc civac of the descriptor's line) and `=4` (break-before-make rewrite) test whether the walker just needs the
 entry rewritten.
+
+Result of experiments 3 and 4 (2026-11-19): `dc civac` of the descriptor's line and a break-before-make rewrite, both executed from the SAMPLER's CPU, do not free
+the thread (system time +0.90 s per second, same far/pc). They ran on the wrong CPU, and the earlier whole-cache clean (set/way) only writes back,
+it does not invalidate. If the stuck CPU holds a stale cached copy of the L3 table line (the descriptor was written by another CPU and the line is not
+snooped: every XNU PTE here is Outer Shareable, SH=2, and the SoC may only keep Inner Shareable coherent), only an invalidate executed on THAT CPU
+helps, and the entry becomes visible when the stale line is evicted at some random later time. Experiments `sweetsampletlbi=5` (flush every CPU's data
+cache with an xcall) and `=6` (`dc civac` of the descriptor on the stuck CPU) test exactly that. If it holds, the fix is inner shareable PTEs
+(and TCR_EL1.SH0/SH1) in the arm64 pmap.
