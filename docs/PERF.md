@@ -74,3 +74,13 @@ valid page, e.g. pa 0x10cb9c000) but the hardware keeps reporting "no valid desc
 wrote (non-coherent walk: the line sits dirty in a cache until it is evicted, which would explain the random 15-175 s), or a PTE the pmap writes in a
 form the hardware treats as invalid (16K granule/level 3 handling). Experiment `sweetsampletlbi=2`: clean the data caches of every CPU
 (CleanPoC_Dcache) and see whether the stuck thread moves on.
+
+### The page tables are right and the hardware still faults (2026-11-19)
+
+Hand walk of the stuck address (patch 0155, 16K granule, T0SZ 17, TTBR0 == pmap root and same ASID, TCR IPS 2 = 40 bit PA):
+`L1[0]=0x10a298003 L2[129]=0x10a700003 L3[1064]=0x6000010a6fce43`: a valid page descriptor (type 3, AF 1, AP 1 = EL0 read/write, SH 2 = outer
+shareable as XNU sets it, AttrIdx 0, PXN/UXN 1/1, nG 1, OA 0x10a6fc000). The CPU reports a level 3 translation fault for a store to it, repeatedly, for
+15-175 s. Neither `tlbi vmalle1is` nor a clean of every CPU's data caches (set/way) helped. In all samples the root table, L3 table and the page are
+above 4 GiB (0x1_0000_0000+): the stalls could be tied to pages from the upper half of DRAM (not proven: no sample of a healthy fault to compare).
+Experiments `sweetsampletlbi=3` (dc civac of the descriptor's line) and `=4` (break-before-make rewrite) test whether the walker just needs the
+entry rewritten.
