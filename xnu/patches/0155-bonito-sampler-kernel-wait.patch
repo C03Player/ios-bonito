@@ -1,7 +1,7 @@
 diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 --- a/osfmk/kern/exception.c
 +++ b/osfmk/kern/exception.c
-@@ -1000,6 +1000,199 @@
+@@ -1000,9 +1000,236 @@
   */
  void sweet_sample_task(const char *name, int pid, task_t task);
  
@@ -198,10 +198,47 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +	    (unsigned)((sweet_xc_tcr >> 14) & 3), (unsigned long long)sweet_xc_sctlr);
 +}
 +
++/* page counts and the busy kernel threads: is a stalled boot a reclaim fight (memory pressure) between CPUs? */
++extern unsigned int vm_page_free_count, vm_page_active_count, vm_page_inactive_count, vm_page_speculative_count, vm_page_wire_count;
++extern unsigned int vm_page_throttled_count, vm_page_free_target, vm_page_free_min, vm_page_free_reserved, vm_page_pageable_internal_count,
++    vm_page_pageable_external_count, vm_page_purgeable_count;
++
++static void
++sweet_sample_kernel_threads(task_t task)
++{
++	thread_t thread;
++
++	printf("SMP vm: free %u (min %u target %u reserved %u) active %u inactive %u speculative %u wired %u throttled %u pageable int/ext %u/%u purgeable %u\n",
++	    vm_page_free_count, vm_page_free_min, vm_page_free_target, vm_page_free_reserved, vm_page_active_count, vm_page_inactive_count,
++	    vm_page_speculative_count, vm_page_wire_count, vm_page_throttled_count, vm_page_pageable_internal_count,
++	    vm_page_pageable_external_count, vm_page_purgeable_count);
++	task_lock(task);
++	queue_iterate(&task->threads, thread, thread_t, task_threads) {
++		time_value_t ut, st;
++		extern uint64_t mach_absolute_time(void);
++		thread_read_times(thread, &ut, &st, NULL);
++		if (!(thread->state & TH_RUN) && st.seconds < 2) {
++			continue;       /* quiet kernel threads: not interesting */
++		}
++		printf("SMP kthread %p state 0x%x pri %d/%d sys %d.%03d s cont %#llx event %#llx lastcpu %d\n", thread, (unsigned)thread->state,
++		    thread->sched_pri, thread->base_pri, st.seconds, st.microseconds / 1000,
++		    (unsigned long long)ml_static_unslide((vm_offset_t)thread->continuation), (unsigned long long)thread->wait_event,
++		    thread->last_processor != PROCESSOR_NULL ? (int)thread->last_processor->cpu_id : -1);
++	}
++	task_unlock(task);
++}
++
  void
  sweet_sample_task(const char *name, int pid, task_t task)
  {
-@@ -1040,6 +1233,29 @@
++	if (pid == 0) {
++		sweet_sample_kernel_threads(task);
++		return;
++	}
+ 	vm_map_t map = get_task_map(task);
+ 	uint64_t slide = 0;
+ 	int tn = 0;
+@@ -1040,6 +1267,29 @@
  			fp = frame[0];
  		}
  		printf("%s\n", line);
