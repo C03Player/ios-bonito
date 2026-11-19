@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -446,5 +446,331 @@
+@@ -446,5 +446,356 @@
  	return ENOENT;
  }
 +
@@ -32,6 +32,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +#define HS200_CHUNKS    16u
 +
 +static bool emmc_hs200_failed;
++static int hs200_dll_limit;        /* sweeths200=4N: stop hs200_dll_init after section N (bisecting a hang) */
 +
 +static uint64_t
 +hs200_hash(const void *p, size_t len)
@@ -106,17 +107,33 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +
 +	printf("SWEET EMMC: SDCC version %#x (major %u minor %#x): updated DLL reset %d, DLL user control %d\n", ver, major,
 +	    minor, upd, userctl);
++	if (hs200_dll_limit == 1) {
++		printf("SWEET EMMC: DLL section 1 done (version read)\n");
++		return true;
++	}
 +	if (upd) {
 +		sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) & ~DLL_CK_OUT_EN);
 +		sd_wr32(MSM_DLL_CONFIG2, sd_rd32(MSM_DLL_CONFIG2) | DLL2_CLK_DIS);
 +	}
++	if (hs200_dll_limit == 2) {
++		printf("SWEET EMMC: DLL section 2 done (CK_OUT off, clock gated)\n");
++		return true;
++	}
 +	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) | DLL_RST);
 +	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) | DLL_PDN);
++	if (hs200_dll_limit == 3) {
++		printf("SWEET EMMC: DLL section 3 done (reset and power-down set)\n");
++		return true;
++	}
 +	hs200_dll_freq();
 +	if (upd) {
 +		uint32_t mclk = (sd_rd32(MSM_DLL_CONFIG2) & DLL2_FLL_CYCLE) ? (HS200_HZ / 19200000u) * 8 : (HS200_HZ / 19200000u) * 4;
 +		sd_wr32(MSM_DLL_CONFIG2, (sd_rd32(MSM_DLL_CONFIG2) & ~(0xffu << 10)) | (mclk << 10));
 +		delay(5);
++	}
++	if (hs200_dll_limit == 4) {
++		printf("SWEET EMMC: DLL section 4 done (frequency and FLL cycle set)\n");
++		return true;
 +	}
 +	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) & ~DLL_RST);
 +	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) & ~DLL_PDN);
@@ -126,6 +143,10 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	}
 +	if (userctl) {
 +		sd_wr32(MSM_DLL_USR_CTL, 0x10800u | (1u << 26));
++	}
++	if (hs200_dll_limit == 5) {
++		printf("SWEET EMMC: DLL section 5 done (reset released)\n");
++		return true;
 +	}
 +	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) | DLL_EN);
 +	sd_wr32(MSM_DLL_CONFIG, sd_rd32(MSM_DLL_CONFIG) | DLL_CK_OUT_EN);
@@ -234,6 +255,10 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	static uint64_t base[HS200_CHUNKS];
 +	uint32_t good = 0, i;
 +	int e;
++	if (stage > 40 && stage < 50) {
++		hs200_dll_limit = stage - 40;
++		stage = 4;
++	}
 +	uint16_t hctl2 = sd_rd16(SD_HCTL2);
 +
 +	if (stage == 9) {       /* probe: the hook alone */
@@ -333,7 +358,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  
  static int
  ufs_take_over_host(void)
-@@ -523,6 +849,15 @@
+@@ -523,6 +874,15 @@
  		sd_wr8(SD_HCTL, sd_rd8(SD_HCTL) | 0x20);
  		delay(2000);
  		printf("SWEET EMMC: 8-bit high speed, 50 MHz\n");
