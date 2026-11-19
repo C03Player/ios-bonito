@@ -152,3 +152,25 @@ Verified on the phone: with `sweetgpu=6 sweetmtl=1`, backboardd and SpringBoard 
 was claimed (`user pool 96 MiB`). NOT verified yet: any user client call (there is no userland client on the phone), the GPU being ready when one connects
 (stage A only starts 60 s after boot), and Metal itself: Metal looks for `/System/Library/Extensions/SweetMetal(2).bundle`, which does not exist on the root image.
 Limits: the page-table arena is inside the 4 MiB pool (about 380 L3 tables, roughly 760 MB of mapped GPU memory).
+
+
+## Userland stack and how it gets onto the phone (2026-11-19)
+
+**Build** (CI, `.github/workflows/userland.yml`, artifact `userland-gpu`, about 23 MB, builds in well under an hour on the first try): Mesa Turnip for iOS 16 with the
+darwin kernel backend, the metal2vulkan Rust bridge, `SweetMetal2.bundle`, and the test programs `vktest` (Turnip: device, fill+copy, compute, a triangle) and
+`m2vtest` (the bridge). Sources and pins: `bonito/userland/README.md` (copied from ios-flame, which draws the Pixel 4 home screen with the same stack and kernel ABI).
+
+**Memory** (patch 0157): GPU buffers for userland come from RAM XNU does not manage (low RAM at 0xb0000000, up to 204 MB), not from managed pages: a write-combined
+CPU view of a managed page is a mismatched alias of its cacheable one. XNU on bonito only manages the 1.94 GB above 4 GiB, so every page it hands out is >= 4 GiB.
+
+**Install** (no mounting, the container has no loop devices): `bonito/tools/hfsx_write.py` inserts folders and files into the HFSX root image directly
+(catalog B-tree inserts with node splits, allocation bitmap, volume header and its backup), with an undo log (`--undo`) and a log of every byte range written
+(`--touched`). Verified on a synthetic image with 800 files (depth 3 tree, `fsck.hfsplus` clean, contents identical, undo restores the original, delta ranges
+reproduce the edited image) and on the real image (fsck clean, files read back identical). Work on a COPY (`/usb/work/ios16-root-userland.img`; the original
+under `/usb/build` belongs to an unmapped uid and stays pristine). `bonito/tools/add-gpu-test-jobs.py` adds boot-time test jobs to `/System/Library/xpc/launchd.plist`.
+
+**Flash**: `flash-sparse.py IMAGE userdata` (about 20 min when the image is mostly zeros; 60+ min with this much data on this host). Right after a full flash, before
+iOS has booted from it (iOS rewrites metadata every boot), `bonito/tools/flash-delta.py IMAGE userdata TOUCHED_FILE` sends only the ranges an edit touched: seconds.
+
+**Boot**: `sweetgpu=6 sweetmtl=2 sweetgpudelay=5` (the GPU is ready before launchd starts backboardd); log lines `MTL2[pid name]:` from the plugin, the test jobs print `PASS`/`FAIL`
+lines to the console.
