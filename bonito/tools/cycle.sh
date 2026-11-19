@@ -11,6 +11,9 @@
 # Exit status: 0 ok; 1 the phone never came back (hang that no reset caught: it needs a Power hold); 2 could not reach
 # the bootloader to start; 3 the log could not be read.
 #
+# WAIT_PHONE=SECS (default 240): how long to wait for a phone that is not visible (a hung phone needs a Power hold; a patient
+# cycle then starts by itself when it comes back).
+#
 # Safety: checks `fastboot getvar product` says bonito before anything is written, resets the A/B retry counter
 # (`fastboot set_active a`) every cycle, and only ever runs `fastboot boot`/`set_active`/`reboot` (no flashing).
 cd "$(dirname "$0")/../.." || exit 2
@@ -41,8 +44,8 @@ to_bootloader() {
 	local s
 	s=$(state)
 	if [ "$s" = none ]; then
-		say "phone not visible; waiting up to 4 minutes (it may be booting)"
-		for _ in $(seq 1 120); do s=$(state); [ "$s" != none ] && break; sleep 2; done
+		say "phone not visible; waiting up to ${WAIT_PHONE:-240} s (it may be booting; WAIT_PHONE=SECS makes the cycle patient)"
+		for _ in $(seq 1 $((${WAIT_PHONE:-240} / 2))); do s=$(state); [ "$s" != none ] && break; sleep 2; done
 	fi
 	if [ "$s" = recovery ]; then
 		say "in recovery: adb reboot bootloader"
