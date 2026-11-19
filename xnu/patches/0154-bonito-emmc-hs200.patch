@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -446,5 +446,295 @@
+@@ -446,5 +446,304 @@
  	return ENOENT;
  }
 +
@@ -213,6 +213,15 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	uint32_t good = 0, i;
 +	int e;
 +
++	if (stage == 9) {       /* probe: the hook alone */
++		printf("SWEET EMMC: HS200 probe 9: returning success at once\n");
++		return 0;
++	}
++	if (stage == 8) {       /* probe: only the fallback re-initialisation */
++		printf("SWEET EMMC: HS200 probe 8: returning an error at once\n");
++		return -88;
++	}
++
 +	for (i = 0; i < HS200_CHUNKS; i++) {
 +		if (hs200_read_hash(i, &base[i])) {
 +			printf("SWEET EMMC: HS200: baseline read failed\n");
@@ -297,7 +306,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  
  static int
  ufs_take_over_host(void)
-@@ -523,6 +813,15 @@
+@@ -523,6 +822,15 @@
  		sd_wr8(SD_HCTL, sd_rd8(SD_HCTL) | 0x20);
  		delay(2000);
  		printf("SWEET EMMC: 8-bit high speed, 50 MHz\n");
