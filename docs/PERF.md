@@ -64,3 +64,13 @@ vm_fault_pmap_enter_with_object_lock -> vm_fault_attempt_pmap_enter -> pmap_ente
 maps the page, the process faults again at the same instruction, and that repeats (99 % of its time is kernel time) until something changes after
 15-175 s. Next: print far/esr of the last exception (patch 0155) to see the address and the fault kind (translation, access flag, permission,
 instruction or data), then compare with how this port's pmap sets up PTEs (16K pages, execute permission, AF, shareability).
+
+### What the repeated fault is (far/esr, TLB experiment)
+
+`esr 0x92000047` = EC 0x24 (data abort from EL0), WnR=1 (a write), DFSC 0x07 (translation fault, level 3), at an address in the process's own
+`__DATA` (e.g. far 0x104c38008), always at the same pc (a libsystem/dyld store). The pmap HAS a mapping for the address (`pmap_find_phys` returned a
+valid page, e.g. pa 0x10cb9c000) but the hardware keeps reporting "no valid descriptor". `tlbi vmalle1is` on all CPUs does NOT help (system time
++0.90 s per second afterwards, same far and pc), so it is not a stale TLB entry. Remaining suspects: the table walker not seeing the PTE the kernel
+wrote (non-coherent walk: the line sits dirty in a cache until it is evicted, which would explain the random 15-175 s), or a PTE the pmap writes in a
+form the hardware treats as invalid (16K granule/level 3 handling). Experiment `sweetsampletlbi=2`: clean the data caches of every CPU
+(CleanPoC_Dcache) and see whether the stuck thread moves on.
