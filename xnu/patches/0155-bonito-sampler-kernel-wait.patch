@@ -1,7 +1,7 @@
 diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 --- a/osfmk/kern/exception.c
 +++ b/osfmk/kern/exception.c
-@@ -1000,6 +1000,117 @@
+@@ -1000,6 +1000,127 @@
   */
  void sweet_sample_task(const char *name, int pid, task_t task);
  
@@ -14,6 +14,7 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +extern vm_offset_t ml_static_unslide(vm_offset_t);
 +static uint64_t sweet_xc_bt[32];
 +static volatile int sweet_xc_n, sweet_xc_done;
++static uint64_t sweet_xc_ttbr0, sweet_xc_tcr, sweet_xc_sctlr;
 +
 +static void
 +sweet_xc_capture(void *arg)
@@ -23,6 +24,9 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +	uint64_t ks = (uint64_t)th->kernel_stack, ke = ks + KERNEL_STACK_SIZE;
 +	int n = 0;
 +
++	__asm__ volatile ("mrs %0, ttbr0_el1" : "=r" (sweet_xc_ttbr0));
++	__asm__ volatile ("mrs %0, tcr_el1" : "=r" (sweet_xc_tcr));
++	__asm__ volatile ("mrs %0, sctlr_el1" : "=r" (sweet_xc_sctlr));
 +	sweet_xc_n = 0;
 +	while (n < 32 && fp != 0 && (fp & 7) == 0 && fp >= 0xfffffe0000000000ull) {
 +		uint64_t *f = (uint64_t *)fp;
@@ -82,7 +86,7 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +}
 +
 +static void
-+sweet_sample_kstack(thread_t thread)
++sweet_sample_kstack(task_t task, thread_t thread)
 +{
 +	processor_t pr = thread->last_processor;
 +	int cpu, me;
@@ -114,12 +118,18 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +		n += snprintf(line + n, sizeof(line) - n, " 0x%llx", (unsigned long long)ml_static_unslide((vm_offset_t)sweet_xc_bt[i]));
 +	}
 +	printf("%s\n", line);
++	/* the translation the CPU really uses against the process's page table root: TTBR0 low 48 bits (minus the ASID) must equal pmap->ttep */
++	printf("SMP kstack cpu %d: ttbr0 0x%llx (base 0x%llx asid %u), process pmap root 0x%llx asid %u, tcr 0x%llx (IPS %u, T0SZ %u, TG0 %u), sctlr 0x%llx\n",
++	    cpu, (unsigned long long)sweet_xc_ttbr0, (unsigned long long)(sweet_xc_ttbr0 & 0x0000fffffffffffeull),
++	    (unsigned)(sweet_xc_ttbr0 >> 48), (unsigned long long)get_task_pmap(task)->ttep, (unsigned)get_task_pmap(task)->hw_asid,
++	    (unsigned long long)sweet_xc_tcr, (unsigned)((sweet_xc_tcr >> 32) & 7), (unsigned)(sweet_xc_tcr & 0x3f),
++	    (unsigned)((sweet_xc_tcr >> 14) & 3), (unsigned long long)sweet_xc_sctlr);
 +}
 +
  void
  sweet_sample_task(const char *name, int pid, task_t task)
  {
-@@ -1040,6 +1151,29 @@
+@@ -1040,6 +1161,29 @@
  			fp = frame[0];
  		}
  		printf("%s\n", line);
@@ -144,7 +154,7 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +		printf("SMP %s t%d last exception: far 0x%llx esr 0x%x (EC 0x%x) pc 0x%llx\n", name, tn - 1,
 +		    (unsigned long long)const_saved_state64(ss)->far, (unsigned)const_saved_state64(ss)->esr,
 +		    (unsigned)(const_saved_state64(ss)->esr >> 26), (unsigned long long)get_saved_state_pc(ss));
-+		sweet_sample_kstack(thread);
++		sweet_sample_kstack(task, thread);
 +		sweet_sample_tlbi_test(task, thread, ss, name, tn - 1);
  	}
  	task_unlock(task);
