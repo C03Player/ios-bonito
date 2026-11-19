@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Minimal HFSX writer: add folders and files to a case-sensitive HFS+ volume image WITHOUT mounting it (the dev container has no loop devices).
 
+  IMAGE is an image file, or adb:/dev/block/mmcblk0p72 for the volume on the phone (recovery with adb; journal must be empty).
   hfsx_write.py IMAGE [--undo FILE] mkdir /abs/dir [MODE]
   hfsx_write.py IMAGE [--undo FILE] put LOCAL_FILE /abs/path [MODE]
   hfsx_write.py IMAGE [--undo FILE] replace LOCAL_FILE /abs/path         (new contents for an existing file)
@@ -71,6 +72,97 @@ class Img:
     def sync(self):
         self.f.flush()
         os.fsync(self.f.fileno())
+
+
+class AdbImg(Img):
+    """The volume on the phone's userdata partition, through adb in the Linux recovery (adb exec-out/exec-in dd, 512-byte sectors).
+
+    Use `adb:/dev/block/mmcblk0p72` as IMAGE. Reads are cached in 4 KiB blocks (adb has a high latency per call). Before the first write the volume must
+    have an EMPTY journal (bsd XNU's sweetnoinit=1 boot leaves it that way: mount replays the journal, a sync empties it), otherwise iOS would replay old
+    journal blocks over the edits at the next mount: the writer refuses.
+    """
+    def __init__(self, dev, undo=None, touched=None):
+        import subprocess
+        self.sp = subprocess
+        self.dev = dev
+        self.touched = open(touched, 'a') if touched else None
+        self.undo = open(undo, 'ab') if undo else None
+        self.saved = set()
+        self.cache = {}
+        vh = self._dd_read(1024, 512)
+        if vh[:2] != b'HX':
+            raise SystemExit(f'{dev}: not an HFSX volume (signature {vh[:2]!r})')
+        self.size = u32(vh, 44) * u32(vh, 40)
+        self.journal_checked = False
+        self.check_journal()
+
+    def _dd_read(self, off, n):
+        first, last = off // 512, (off + n + 511) // 512
+        r = self.sp.run(['adb', 'exec-out', f'dd if={self.dev} bs=512 skip={first} count={last - first} 2>/dev/null'], capture_output=True)
+        if len(r.stdout) != (last - first) * 512:
+            raise SystemExit(f'adb read failed ({len(r.stdout)} bytes): is the phone in the recovery?')
+        return r.stdout[off - first * 512:off - first * 512 + n]
+
+    def read(self, off, n):
+        first, last = off // 4096, (off + n - 1) // 4096
+        b = first
+        while b <= last:                      # fetch the missing blocks in contiguous runs
+            if b in self.cache:
+                b += 1
+                continue
+            e = b
+            while e + 1 <= last and e + 1 not in self.cache and e + 1 - b < 256:
+                e += 1
+            data = self._dd_read(b * 4096, (e - b + 1) * 4096)
+            for k in range(e - b + 1):
+                self.cache[b + k] = data[k * 4096:(k + 1) * 4096]
+            b = e + 1
+        buf = b''.join(self.cache[k] for k in range(first, last + 1))
+        return buf[off - first * 4096:off - first * 4096 + n]
+
+    def check_journal(self):
+        vh = self._dd_read(1024, 512)
+        bs = u32(vh, 40)
+        jib = self._dd_read(u32(vh, 12) * bs, 64)
+        off = u64(jib, 36)
+        jh = self._dd_read(off, 64)
+        magic, endian, start, end = struct.unpack('<IIQQ', jh[:24])
+        if magic != 0x4a4e4c78:
+            # not initialised yet (flags 4): nothing pending
+            if u32(jib, 0) & 4:
+                self.journal_checked = True
+                return
+            raise SystemExit(f'unexpected journal header magic {magic:#x}')
+        if start != end:
+            raise SystemExit(f'the journal has {end - start} bytes of pending transactions: boot once with sweetnoinit=1 (xnu patch 0159) to replay and flush it, then edit')
+        self.journal_checked = True
+
+    def _put(self, off, data):
+        first, last = off // 512, (off + len(data) - 1) // 512
+        cur = bytearray(self._dd_read(first * 512, (last - first + 1) * 512))
+        cur[off - first * 512:off - first * 512 + len(data)] = data
+        self.sp.run(['adb', 'exec-in', f'dd of={self.dev} bs=512 seek={first} conv=notrunc 2>/dev/null'], input=bytes(cur), check=True)
+        for b in range(off // 4096, (off + len(data) - 1) // 4096 + 1):
+            self.cache.pop(b, None)
+
+    def write(self, off, data):
+        if self.undo is not None:
+            for c in range(off // CHUNK, (off + len(data) - 1) // CHUNK + 1):
+                if c not in self.saved:
+                    self.saved.add(c)
+                    orig = self._dd_read(c * CHUNK, CHUNK)
+                    self.undo.write(struct.pack('>QI', c * CHUNK, len(orig)) + orig)
+            self.undo.flush()
+            os.fsync(self.undo.fileno())
+        self._put(off, data)
+        self.log(off, len(data))
+
+    def write_raw(self, off, data):
+        self._put(off, data)
+        self.log(off, len(data))
+
+    def sync(self):
+        pass
 
 
 def undo_all(imgpath, undopath):
@@ -536,8 +628,10 @@ def main():
         raise SystemExit(__doc__)
     image, cmd, args = a[0], a[1], a[2:]
     if cmd == 'undo':
+        if image.startswith('adb:'):
+            raise SystemExit('undo of a live volume: restore the regions with the undo log by hand (adb exec-in dd)')
         return undo_all(image, args[0])
-    img = Img(image, undo, touched)
+    img = AdbImg(image[4:], undo, touched) if image.startswith('adb:') else Img(image, undo, touched)
     w = HFSW(img)
     if cmd == 'mkdir':
         w.mkdir(args[0], int(args[1], 8) if len(args) > 1 else 0o755)
