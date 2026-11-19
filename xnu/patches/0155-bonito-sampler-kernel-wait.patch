@@ -1,7 +1,84 @@
 diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 --- a/osfmk/kern/exception.c
 +++ b/osfmk/kern/exception.c
-@@ -1040,6 +1040,22 @@
+@@ -1000,6 +1000,76 @@
+  */
+ void sweet_sample_task(const char *name, int pid, task_t task);
+ 
++/*
++ * Where is a thread that burns CPU in the kernel? A cross call makes its CPU run sweet_xc_capture() in interrupt context; the
++ * frame pointer chain from there continues through the interrupted kernel code, so the return addresses are its callers
++ * (printed unslid: look them up in the kernel binary). The leaf function itself is not in the chain.
++ */
++extern kern_return_t cpu_xcall(int, void (*)(void *), void *);
++extern vm_offset_t ml_static_unslide(vm_offset_t);
++static uint64_t sweet_xc_bt[32];
++static volatile int sweet_xc_n, sweet_xc_done;
++
++static void
++sweet_xc_capture(void *arg)
++{
++	thread_t th = (thread_t)arg;
++	uint64_t fp = (uint64_t)__builtin_frame_address(0);
++	uint64_t ks = (uint64_t)th->kernel_stack, ke = ks + KERNEL_STACK_SIZE;
++	int n = 0;
++
++	sweet_xc_n = 0;
++	while (n < 32 && fp != 0 && (fp & 7) == 0 && fp >= 0xfffffe0000000000ull) {
++		uint64_t *f = (uint64_t *)fp;
++		uint64_t nfp;
++		sweet_xc_bt[n++] = f[1];
++		nfp = f[0];
++		/* the next frame is higher on the same stack, or (leaving the interrupt stack) inside the thread's kernel stack */
++		if (!((nfp > fp && nfp - fp < 0x4000) || (nfp >= ks && nfp < ke && (fp < ks || fp >= ke)))) {
++			break;
++		}
++		fp = nfp;
++	}
++	sweet_xc_n = n;
++	__asm__ volatile ("dmb ish" ::: "memory");
++	sweet_xc_done = 1;
++}
++
++static void
++sweet_sample_kstack(thread_t thread)
++{
++	processor_t pr = thread->last_processor;
++	int cpu, me;
++	char line[400];
++	int n;
++
++	if (pr == PROCESSOR_NULL || !(thread->state & TH_RUN) || thread->runq != PROCESSOR_NULL) {
++		return;
++	}
++	cpu = (int)pr->cpu_id;
++	me = (int)cpu_number();
++	if (cpu == me) {
++		return;
++	}
++	sweet_xc_done = 0;
++	if (cpu_xcall(cpu, sweet_xc_capture, thread) != KERN_SUCCESS) {
++		printf("SMP kstack: cpu_xcall to cpu %d failed\n", cpu);
++		return;
++	}
++	for (int i = 0; i < 300 && !sweet_xc_done; i++) {
++		delay(1000);
++	}
++	if (!sweet_xc_done) {
++		printf("SMP kstack: cpu %d did not answer\n", cpu);
++		return;
++	}
++	n = snprintf(line, sizeof(line), "SMP kstack cpu %d (the thread ran there last), callers unslid:", cpu);
++	for (int i = 0; i < sweet_xc_n && n < (int)sizeof(line) - 20; i++) {
++		n += snprintf(line + n, sizeof(line) - n, " 0x%llx", (unsigned long long)ml_static_unslide((vm_offset_t)sweet_xc_bt[i]));
++	}
++	printf("%s\n", line);
++}
++
+ void
+ sweet_sample_task(const char *name, int pid, task_t task)
+ {
+@@ -1040,6 +1110,23 @@
  			fp = frame[0];
  		}
  		printf("%s\n", line);
@@ -21,6 +98,7 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +			    thread->base_pri, thread->last_processor != PROCESSOR_NULL ? (int)thread->last_processor->cpu_id : -1,
 +			    (unsigned long long)thread->last_run_time, (unsigned long long)mach_absolute_time());
 +		}
++		sweet_sample_kstack(thread);
  	}
  	task_unlock(task);
  }
