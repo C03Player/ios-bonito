@@ -54,3 +54,13 @@ waiting for anything: it burns CPU almost entirely in the kernel while its saved
 page fault (or syscall restart) that repeats without making progress fits, and a random duration (15-175 s) fits something that
 eventually resolves (a lock, a page state, memory pressure). Patch 0155 now also prints the kernel call chain (cross call to the CPU,
 frame pointer walk, unslid addresses; look them up with `nm` on the kernel from the CI artifact).
+
+### The stall is a user page fault that repeats (kernel call chain, 2026-11-19)
+
+Two samples of the spinning thread (`launchd_cache_loader`, 95 s and 215 s) with the unslid kernel addresses looked up in the CI kernel
+(`llvm-nm -n --defined-only kernel.development.sweet`): the interrupted code is inside
+`fleh_synchronous -> sleh_synchronous -> handle_user_abort -> vm_fault -> vm_fault_internal -> vm_fault_enter ->
+vm_fault_pmap_enter_with_object_lock -> vm_fault_attempt_pmap_enter -> pmap_enter_options(_internal)`. So a user page fault is handled, the kernel
+maps the page, the process faults again at the same instruction, and that repeats (99 % of its time is kernel time) until something changes after
+15-175 s. Next: print far/esr of the last exception (patch 0155) to see the address and the fault kind (translation, access flag, permission,
+instruction or data), then compare with how this port's pmap sets up PTEs (16K pages, execute permission, AF, shareability).
