@@ -1,7 +1,7 @@
 diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 --- a/osfmk/kern/exception.c
 +++ b/osfmk/kern/exception.c
-@@ -1040,6 +1040,11 @@
+@@ -1040,6 +1040,22 @@
  			fp = frame[0];
  		}
  		printf("%s\n", line);
@@ -10,6 +10,17 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +		    name, tn - 1, (long long)get_saved_state_reg(ss, 16), get_saved_state_reg(ss, 0), get_saved_state_reg(ss, 1),
 +		    get_saved_state_reg(ss, 2), (unsigned)thread->state, (int)thread->block_hint, (unsigned long long)thread->wait_event,
 +		    (unsigned long long)(uintptr_t)thread->continuation, (int)thread->wait_result);
++		{
++			/* CPU time used, run queue, priority, and when it last ran: a runnable thread that never runs is starved, one with a lot of
++			 * system time is spinning in the kernel */
++			time_value_t ut, st;
++			extern uint64_t mach_absolute_time(void);
++			thread_read_times(thread, &ut, &st, NULL);
++			printf("SMP %s t%d cpu user %d.%06d s sys %d.%06d s, runq %d pri %d/%d lastcpu %d last_run %llu now %llu\n", name, tn - 1,
++			    ut.seconds, ut.microseconds, st.seconds, st.microseconds, thread->runq != PROCESSOR_NULL, thread->sched_pri,
++			    thread->base_pri, thread->last_processor != PROCESSOR_NULL ? (int)thread->last_processor->cpu_id : -1,
++			    (unsigned long long)thread->last_run_time, (unsigned long long)mach_absolute_time());
++		}
  	}
  	task_unlock(task);
  }
