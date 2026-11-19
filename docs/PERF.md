@@ -45,3 +45,12 @@ Independent of HS200 a boot sometimes stops for 15-175 s at one launchd boot tas
 `FinishRestoreFromBackup`, `usermanagerd` seen). `sweetsample=*` (patch 0152) shows the stalled process has ONE thread, always at
 the same user pc 0x1e4ff7e0c (a syscall stub) with the same caller: it is blocked before main(). Patch 0155 adds the syscall number
 and kernel wait state to the sample to find what it waits for.
+
+### The stall is a kernel CPU spin (2026-11-19, patch 0155 sample)
+
+`mount_hfs` (a child of launchd's mount-phase-1 task) at the 40 s sample: kernel state TH_RUN, no wait event, on CPU 0, CPU time user 3.8 s /
+**sys 34.5 s**; at the next sample 120 s later user 15.7 s / sys 142.6 s, same user pc and sp both times. So the stalled process is not
+waiting for anything: it burns CPU almost entirely in the kernel while its saved user state does not change. A livelock such as a
+page fault (or syscall restart) that repeats without making progress fits, and a random duration (15-175 s) fits something that
+eventually resolves (a lock, a page state, memory pressure). Patch 0155 now also prints the kernel call chain (cross call to the CPU,
+frame pointer walk, unslid addresses; look them up with `nm` on the kernel from the CI artifact).
