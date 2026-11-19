@@ -1,7 +1,7 @@
 diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 --- a/osfmk/kern/exception.c
 +++ b/osfmk/kern/exception.c
-@@ -1000,6 +1000,127 @@
+@@ -1000,6 +1000,154 @@
   */
  void sweet_sample_task(const char *name, int pid, task_t task);
  
@@ -65,7 +65,34 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 +		enabled = (int)v;       /* 1 flush the TLBs, 2 clean the data caches of every CPU (the walker may not see the PTE the kernel wrote) */
 +	}
 +	thread_read_times(thread, &ut, &st, NULL);
-+	if (!enabled || !(thread->state & TH_RUN) || st.seconds < 5) {
++	if (!(thread->state & TH_RUN) || st.seconds < 5) {
++		return;
++	}
++	{
++		/* walk the process's tables for far by hand (16K granule, T0SZ 17: L1 index bits 46:36, L2 35:25, L3 24:14) and print the descriptors */
++		extern vm_map_address_t phystokv(pmap_paddr_t);
++		pmap_t pm = get_task_pmap(task);
++		uint64_t idx[3] = { (far >> 36) & 0x7ff, (far >> 25) & 0x7ff, (far >> 14) & 0x7ff };
++		uint64_t pa = pm->ttep, desc[3] = { 0, 0, 0 };
++		int lv;
++		for (lv = 0; lv < 3; lv++) {
++			if (pa < 0x80000000ull || pa >= 0x200000000ull || (pa & 0x3fff)) {
++				break;
++			}
++			desc[lv] = *(volatile uint64_t *)(phystokv(pa) + idx[lv] * 8);
++			if ((desc[lv] & 3) != 3 || lv == 2) {
++				break;
++			}
++			pa = desc[lv] & 0x0000ffffffffc000ull;
++		}
++		printf("SMP %s t%d walk of far 0x%llx: L1[%llu]=0x%llx L2[%llu]=0x%llx L3[%llu]=0x%llx (type %llu, AF %llu, AP %llu, SH %llu, AttrIdx %llu, PXN/UXN %llu/%llu, nG %llu, OA 0x%llx)\n",
++		    name, tn, (unsigned long long)far, (unsigned long long)idx[0], (unsigned long long)desc[0], (unsigned long long)idx[1],
++		    (unsigned long long)desc[1], (unsigned long long)idx[2], (unsigned long long)desc[2], (unsigned long long)(desc[2] & 3),
++		    (unsigned long long)((desc[2] >> 10) & 1), (unsigned long long)((desc[2] >> 6) & 3), (unsigned long long)((desc[2] >> 8) & 3),
++		    (unsigned long long)((desc[2] >> 2) & 7), (unsigned long long)((desc[2] >> 53) & 1), (unsigned long long)((desc[2] >> 54) & 1),
++		    (unsigned long long)((desc[2] >> 11) & 1), (unsigned long long)(desc[2] & 0x0000ffffffffc000ull));
++	}
++	if (!enabled) {
 +		return;
 +	}
 +	printf("SMP %s t%d tlbi test: pmap has pa 0x%llx for far 0x%llx; %s\n", name, tn,
@@ -129,7 +156,7 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
  void
  sweet_sample_task(const char *name, int pid, task_t task)
  {
-@@ -1040,6 +1161,29 @@
+@@ -1040,6 +1188,29 @@
  			fp = frame[0];
  		}
  		printf("%s\n", line);
