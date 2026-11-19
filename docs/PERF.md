@@ -103,3 +103,12 @@ enough once the card warms up (the sampling phase drifts), and the in-place fall
 line anywhere in the log although the kernel contains the string and `HS200 active` was printed at 77 s. Next: print `hs200_active` in the failure path,
 and add a retune (re-run the 16-phase tuning) before falling back. HS200 stays off by default (`sweeths200=0`), the hands-on image is
 `bonito/tools/boot-manual.sh RUN_ID sweeths200=0`.
+
+### The stall needs more than one CPU (2026-11-19 19:00)
+
+Same kernel, same root, boot-arg `cpus=1`: no stall at all. launchd boot tasks 125.7 -> 131.9 s (SpringBoard exec 6 s after launchd, backboardd 141 s); the same image
+with `cpus=8` sat 134 s and 150 s in two stalls. So the page fault livelock (valid PTE, hardware keeps reporting a level 3 translation fault, TLB flushes and
+cache flushes on the stuck CPU do nothing) only happens with several cores. Candidate: every PTE and the TCR walk attributes are Outer Shareable (SH=2) as XNU sets
+them for Apple's fabric; on the Kryo 360 (A55/A75, DynamIQ) only Inner Shareable memory is kept coherent between cores, so one core's PTE write stays in its cache while
+another core's table walker reads stale memory until the line is evicted (random delay). Patch 0158 makes SH_OUTER_MEMORY = 3 and TCR SH0/SH1 inner (what Linux uses).
+`CPUS=N` in mkios.sh selects the core count.

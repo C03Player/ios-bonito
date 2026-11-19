@@ -174,3 +174,13 @@ iOS has booted from it (iOS rewrites metadata every boot), `bonito/tools/flash-d
 
 **Boot**: `sweetgpu=6 sweetmtl=2 sweetgpudelay=5` (the GPU is ready before launchd starts backboardd); log lines `MTL2[pid name]:` from the plugin, the test jobs print `PASS`/`FAIL`
 lines to the console.
+
+
+## FIRST BOOT WITH THE USERLAND STACK (2026-11-19 19:00, cpus=1, sweetgpu=6 sweetmtl=2 sweetgpudelay=5)
+
+The GPU is ready 13 s after boot (stage A..C4 and the self-test pass: 2000 submits, 0 faults, 36 us each; 192 MiB user pool in unmanaged low RAM at 0xb0000000).
+`backboardd` loads `SweetMetal2.bundle` through the kernel's IOAcceleratorES: `MTL2[57 backboardd]: device Turnip Adreno (TM) 615 in 3815 ms`, the v2 user client methods 1-15
+are used, and the pipeline journal on the phone (`/var/local/m2v-cache/backboardd/pipelines.log`) lists 14 Core Animation render pipelines compiled on the device
+(AIR -> SPIR-V -> Turnip -> IR3, 90-375 ms each, ok=1). Read from the phone with `bonito/tools/hfsx.py --phone cat PATH OUT` in the log-reading recovery.
+Not seen yet: GPU rendering confirmed on screen, `vktest`/`m2vtest` results (their output goes to /dev/console, not into the kernel log: next time use StandardOutPath files),
+`generateMipmapsForTexture` is refused by metal2vulkan (MipmapGeneration not implemented).
