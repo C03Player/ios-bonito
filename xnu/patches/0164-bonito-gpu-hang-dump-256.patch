@@ -1,0 +1,12 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1336,7 +1336,7 @@
+ 		unsigned pos = rem1 <= g6_last_ib_dw ? g6_last_ib_dw - rem1 : 0;
+ 		printf("SWEET GPU615: hang: last IB at GPU VA %#llx, %u dwords, the CP stopped at dword %u\n", (unsigned long long)g6_last_ib_va,
+ 		    g6_last_ib_dw, pos);
+-		g6_dump_dwords(g6_last_ib_va, 0, g6_last_ib_dw < 24 ? g6_last_ib_dw : 24);
++		g6_dump_dwords(g6_last_ib_va, 0, g6_last_ib_dw < 256 ? g6_last_ib_dw : 256);      /* the start of every Turnip IB is tu6_init_hw */
+ 		if (pos > 16) {
+ 			g6_dump_dwords(g6_last_ib_va, pos - 8, 24);
+ 		}
