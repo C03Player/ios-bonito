@@ -1,0 +1,139 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1125,6 +1125,95 @@
+ 	lck_mtx_unlock(&g6_lock);
+ }
+ 
++/*
++ * Hang diagnostics (patch 0160): where is the command processor stuck? Reads the CP's IB1/IB2 position and the protect status, and dumps
++ * the dwords of the last submitted IB around the packet it stopped in (the IB's pages are found with our own page table walk and mapped
++ * once, write-combined; this only runs on a hang, three times at most).
++ */
++extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
++static uint64_t g6_last_ib_va;
++static uint32_t g6_last_ib_dw;
++
++static uint64_t
++g6_va_to_pa(uint64_t va)
++{
++	uint64_t e = 0, tbl = G6_OFF_GT_L1;
++	unsigned idx[3] = { (unsigned)((va >> 30) & 0x1ff), (unsigned)((va >> 21) & 0x1ff), (unsigned)((va >> 12) & 0x1ff) };
++
++	for (int lv = 0; lv < 3; lv++) {
++		g6_pread(tbl + 8ull * idx[lv], &e, 8);
++		if ((e & 3u) != 3u) {
++			return 0;
++		}
++		if (lv == 2) {
++			return (e & 0xfffffff000ull) | (va & 0xfffull);
++		}
++		tbl = (e & 0xfffffff000ull) - g6_pool_pa;
++	}
++	return 0;
++}
++
++static void
++g6_dump_dwords(uint64_t va, unsigned from, unsigned n)
++{
++	char line[200];
++	unsigned i = 0;
++
++	while (i < n) {
++		uint64_t v = va + 4ull * (from + i), pa = g6_va_to_pa(v);
++		unsigned len = 0, cnt = 0;
++		vm_offset_t m;
++
++		if (!pa) {
++			printf("SWEET GPU615: hang: IB dword %u is not mapped\n", from + i);
++			return;
++		}
++		m = ml_io_map_wcomb((vm_offset_t)(pa & ~0xfffull), 0x1000);
++		if (!m) {
++			return;
++		}
++		while (i < n && cnt < 8 && ((v + 4ull * cnt) >> 12) == (v >> 12)) {
++			len += (unsigned)snprintf(line + len, sizeof(line) - len, " %08x",
++			    *(volatile uint32_t *)(m + ((pa + 4ull * cnt) & 0xfffull)));
++			cnt++;
++			i++;
++		}
++		printf("SWEET GPU615: hang: IB[%u..]:%s\n", from + i - cnt, line);
++	}
++}
++
++static void
++g6_hang_dump(void)
++{
++	static unsigned dumps;
++	uint32_t ib1_lo, ib1_hi, rem1, ib2_lo, ib2_hi, rem2, a, b;
++
++	if (dumps++ >= 3) {
++		return;
++	}
++	ib1_lo = g6_rd(G6_GMU(0x928));
++	ib1_hi = g6_rd(G6_GMU(0x929));
++	rem1 = g6_rd(G6_GMU(0x92a));
++	ib2_lo = g6_rd(G6_GMU(0x92b));
++	ib2_hi = g6_rd(G6_GMU(0x92c));
++	rem2 = g6_rd(G6_GMU(0x92d));
++	a = g6_rd(G6_GMU(0x980));
++	delay(1000);
++	b = g6_rd(G6_GMU(0x980));
++	printf("SWEET GPU615: hang: IB1 %#x%08x rem %u dwords, IB2 %#x%08x rem %u, protect_status %#x, rbbm_status3 %#x, cp_hw_fault %#x, "
++	    "always-on counter %#x -> %#x (1 ms)\n", ib1_hi, ib1_lo, rem1, ib2_hi, ib2_lo, rem2, g6_rd(G6_GMU(0x824)), g6_rd(G6_GMU(0x213)),
++	    g6_rd(G6_GMU(0x821)), a, b);
++	if (g6_last_ib_va && g6_last_ib_dw) {
++		unsigned pos = rem1 <= g6_last_ib_dw ? g6_last_ib_dw - rem1 : 0;
++		printf("SWEET GPU615: hang: last IB at GPU VA %#llx, %u dwords, the CP stopped at dword %u\n", (unsigned long long)g6_last_ib_va,
++		    g6_last_ib_dw, pos);
++		g6_dump_dwords(g6_last_ib_va, 0, g6_last_ib_dw < 24 ? g6_last_ib_dw : 24);
++		if (pos > 16) {
++			g6_dump_dwords(g6_last_ib_va, pos - 8, 24);
++		}
++	}
++}
++
+ /* An indirect buffer, WAIT_FOR_IDLE and a fence write; 0 when the fence landed within timeout_ms. A fault is cleared. */
+ int
+ bonito_gpu_submit(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms)
+@@ -1139,6 +1228,8 @@
+ 	lck_mtx_lock(&g6_lock);
+ 	fence = ++g6_fence;
+ 	g6_submit_count++;
++	g6_last_ib_va = ib_iova;
++	g6_last_ib_dw = dwords;
+ 	uint32_t dw[] = {
+ 		g6_pkt7(0x3f, 3), (uint32_t)ib_iova, (uint32_t)(ib_iova >> 32), dwords,
+ 		g6_pkt7(G6_CP_WAIT_FOR_IDLE, 0),
+@@ -1154,6 +1245,7 @@
+ 		rc = -2;
+ 	} else if (rc || got != fence) {
+ 		rc = -1;
++		g6_hang_dump();
+ 	}
+ 	lck_mtx_unlock(&g6_lock);
+ 	return rc;
+@@ -1298,6 +1390,22 @@
+ 		}
+ 		printf("SWEET GPU615: stage B complete\n");
+ 	}
++	/* does the GPU still work minutes after init? (patch 0160: every 15 s for 5 minutes, then it idles as before) */
++	for (unsigned n = 1; n <= 20 && g6_ready; n++) {
++		uint32_t ib[4], got = 0, want = 0x1d1e0000u + n;
++		uint64_t va = G6_GVA_POOL + G6_OFF_SCRATCH + 0x20;
++		int rc;
++
++		(void)tsleep(&g6_chan, PZERO, "g6idle", hz * 15);
++		ib[0] = g6_pkt7(G6_CP_MEM_WRITE, 3);
++		ib[1] = (uint32_t)va;
++		ib[2] = (uint32_t)(va >> 32);
++		ib[3] = want;
++		g6_pwrite(G6_OFF_TEST_IB, ib, sizeof(ib));
++		rc = bonito_gpu_submit(G6_GVA_POOL + G6_OFF_TEST_IB, 4, 300);
++		g6_pread(G6_OFF_SCRATCH + 0x20, &got, 4);
++		printf("SWEET GPU615: idle test %u: submit rc %d, memory %s\n", n, rc, got == want ? "written" : "NOT written");
++	}
+ 	for (;;) {
+ 		(void)tsleep(&g6_chan, PZERO, "g6idle", hz * 3600);
+ 	}
