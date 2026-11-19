@@ -1,0 +1,55 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1132,6 +1132,9 @@
+  *   1 EVENT_WRITE CACHE_INVALIDATE   2 PC_CCU_INVALIDATE_DEPTH + COLOR   3 LRZ_FLUSH   4 CACHE_FLUSH_TS (with timestamp)
+  *   5 PC_CCU_FLUSH_COLOR_TS (with timestamp)   6 COND_WRITE5 polling a VSC register   7 SET_MARKER (bypass)   8 WAIT_MEM_WRITES + WAIT_FOR_ME
+  *   9 type-4 register write (RB_CCU_CNTL)   10 NOP packet   11 all the events of 1-3 in a row
++ *   12 event sweetgpuevent (default 0x1d) with timestamp   13 RB_CCU_CNTL then that event   14 that event alone   15 CCU setup, invalidates, then that event
++ * NB the a6xx event numbers: CACHE_FLUSH_TS 0x04, PC_CCU_INVALIDATE_DEPTH 0x18, _COLOR 0x19, PC_CCU_FLUSH_DEPTH_TS 0x1c, _COLOR_TS 0x1d, LRZ_FLUSH 0x25,
++ * CACHE_INVALIDATE 0x31 (test 5 used 0x20, which is not the CCU flush: it wedges the GPU)
+  */
+ static unsigned
+ g6_test_ib(unsigned sel, uint32_t *ib, uint64_t ts_va)
+@@ -1192,6 +1195,24 @@
+ 		EVT(0x19);
+ 		EVT(0x25);
+ 		break;
++	case 12:                                /* the event given by sweetgpuevent (default 0x1d, PC_CCU_FLUSH_COLOR_TS), with a timestamp */
++		EVT_TS(g6_testevent);
++		break;
++	case 13:                                /* RB_CCU_CNTL = 0x10000000 (sysmem, full CCU, as the Pixel 4 driver sets it), then the same event */
++		ib[n++] = 0x40000000u | 1u | (g6_parity(1) << 7) | (0x8e07u << 8) | (g6_parity(0x8e07u) << 27);
++		ib[n++] = 0x10000000u;
++		EVT_TS(g6_testevent);
++		break;
++	case 14:                                /* the event without a timestamp */
++		EVT(g6_testevent);
++		break;
++	case 15:                                /* RB_CCU_CNTL, then invalidate colour+depth CCU, then the event with a timestamp */
++		ib[n++] = 0x40000000u | 1u | (g6_parity(1) << 7) | (0x8e07u << 8) | (g6_parity(0x8e07u) << 27);
++		ib[n++] = 0x10000000u;
++		EVT(0x18);
++		EVT(0x19);
++		EVT_TS(g6_testevent);
++		break;
+ 	default:
+ 		break;
+ 	}
+@@ -1200,7 +1221,7 @@
+ 	return n;
+ }
+ 
+-static unsigned g6_testsel;
++static unsigned g6_testsel, g6_testevent = 0x1d;
+ 
+ /*
+  * Hang diagnostics (patch 0160): where is the command processor stuck? Reads the CP's IB1/IB2 position and the protect status, and dumps
+@@ -1799,6 +1820,7 @@
+ 	}
+ 	PE_parse_boot_argn("sweetgpufast", &g6_fast, sizeof(g6_fast));
+ 	PE_parse_boot_argn("sweetgputest", &g6_testsel, sizeof(g6_testsel));
++	PE_parse_boot_argn("sweetgpuevent", &g6_testevent, sizeof(g6_testevent));
+ 	if (enabled >= 4) {
+ 		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
+ 	}
