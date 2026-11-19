@@ -1,0 +1,378 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1303,6 +1303,280 @@
+ 	}
+ }
+ 
++/*
++ * The sweet_gpu_* API that iokit/Kernel/arm/SweetAccelerator.cpp (IOAcceleratorES + its user client) and SweetFramebuffer.cpp
++ * call. The Pixel 4 kernel gets it from bsd/dev/sweet_gpu.c (Adreno 640); that file is not built for bonito, this is the
++ * Adreno 615 version on top of the service layer above. Submits are synchronous (about 35 us for a small IB), so a fence is
++ * complete by the time it is handed out.
++ *
++ *   boot-args: sweetgpu=6 (service), sweetmtl=1|2 (publish IOAcceleratorES; 2 = the Turnip ABI), sweetgpupool=MB (default 96)
++ */
++#define G6_WIN_BASE     0x1000000000ull         /* client windows: 4 GiB each from 64 GiB up, inside the 39-bit VA space */
++#define G6_WIN_SIZE     0x100000000ull
++#define G6_WINDOWS      32
++#define G6_EXTENTS      64
++
++static uint32_t g6_win_used;
++static struct {
++	uint64_t pa, len;
++} g6_ext[G6_EXTENTS];
++static uint32_t g6_ext_n;
++static uint64_t g6_upool_pa, g6_upool_len;
++
++static void
++g6_upool_alloc(uint32_t mb)
++{
++	vm_offset_t va = 0;
++	uint64_t len;
++
++	for (; mb >= 8; mb /= 2) {
++		len = (uint64_t)mb << 20;
++		if (kmem_alloc_contig(kernel_map, &va, len, PAGE_MASK, 0, 0, KMA_DATA | KMA_ZERO | KMA_PERMANENT,
++		    VM_KERN_MEMORY_IOKIT) == KERN_SUCCESS) {
++			g6_upool_pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)va));
++			g6_upool_len = len;
++			/* nothing touches this memory through the cacheable kernel mapping again; the GPU and the WC user maps own it */
++			flush_dcache64((addr64_t)g6_upool_pa, (unsigned)len, TRUE);
++			g6_ext[0].pa = g6_upool_pa;
++			g6_ext[0].len = len;
++			g6_ext_n = 1;
++			printf("SWEET GPU615: user pool %u MiB at pa %#llx\n", mb, (unsigned long long)g6_upool_pa);
++			return;
++		}
++	}
++	printf("SWEET GPU615: no contiguous user pool (userland buffers will be refused)\n");
++}
++
++void
++sweet_gpu_init(void)
++{
++	/* the Pixel 4 driver started here; the Adreno 615 starts from sweet_gpu615_start() */
++}
++
++bool
++sweet_gpu_ready(void)
++{
++	return g6_ready;
++}
++
++/* the framebuffer's GPU compositing (scale-to-fit blit) is the Pixel 4's; bonito keeps the CPU path */
++bool
++sweet_gpu_fb_ready(void)
++{
++	return false;
++}
++
++int
++sweet_gpu_surface_slot(__unused uint64_t key)
++{
++	return -1;
++}
++
++int
++sweet_gpu_map_surface(__unused uint64_t key, __unused const uint64_t *pages, __unused uint32_t npages, __unused uint32_t page_size)
++{
++	return -1;
++}
++
++int
++sweet_gpu_present(__unused int slot, __unused uintptr_t kva, __unused uint32_t offset, __unused uint32_t w, __unused uint32_t h,
++    __unused uint32_t pitch, __unused uint32_t fb_pitch, __unused uint32_t corner_radius, __unused uint32_t *out_dx,
++    __unused uint32_t *out_dy, __unused uint32_t *out_dw, __unused uint32_t *out_dh)
++{
++	return -1;
++}
++
++void
++sweet_gpu_panel_stride(__unused uint32_t stride)
++{
++}
++
++int
++sweet_gpu_map_user(uint64_t *iova_out, const uint64_t *pages, uint32_t npages, uint32_t page_size)
++{
++	uint64_t va = bonito_gpu_va_alloc((uint64_t)npages * page_size);
++	int rc = bonito_gpu_map_pages(va, pages, npages, page_size);
++	if (!rc) {
++		*iova_out = va;
++	}
++	return rc;
++}
++
++void
++sweet_gpu_unmap_user(uint64_t iova, uint64_t len)
++{
++	bonito_gpu_unmap(iova, len);
++}
++
++int
++sweet_gpu_submit_user(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms, uint32_t *fence_out)
++{
++	int rc = bonito_gpu_submit(ib_iova, dwords, timeout_ms);
++	if (fence_out) {
++		*fence_out = __atomic_load_n(&g6_fence, __ATOMIC_RELAXED);
++	}
++	return rc;
++}
++
++/* 0: the GPU is not usable (a fault was cleared and the fence is complete, so that is not "not usable") */
++uint32_t
++sweet_gpu_submit_user_async(uint64_t ib_iova, uint32_t dwords)
++{
++	int rc = bonito_gpu_submit(ib_iova, dwords, 2000);
++	return (rc == 0 || rc == -2) ? __atomic_load_n(&g6_fence, __ATOMIC_RELAXED) : 0;
++}
++
++int
++sweet_gpu_wait_fence(uint32_t fence, __unused uint32_t timeout_ms)
++{
++	return (int32_t)(__atomic_load_n(&g6_fence, __ATOMIC_RELAXED) - fence) >= 0 ? 0 : 1;
++}
++
++int
++sweet_gpu_wait_fence_ns(uint32_t fence, __unused uint64_t timeout_ns)
++{
++	return sweet_gpu_wait_fence(fence, 0);
++}
++
++int
++sweet_gpu_window_alloc(uint64_t *base, uint64_t *size)
++{
++	int rc = -1;
++	lck_mtx_lock(&g6_lock);
++	for (unsigned i = 0; i < G6_WINDOWS; i++) {
++		if (!(g6_win_used & (1u << i))) {
++			g6_win_used |= 1u << i;
++			*base = G6_WIN_BASE + G6_WIN_SIZE * i;
++			*size = G6_WIN_SIZE;
++			rc = 0;
++			break;
++		}
++	}
++	lck_mtx_unlock(&g6_lock);
++	return rc;
++}
++
++void
++sweet_gpu_window_free(uint64_t base)
++{
++	if (base >= G6_WIN_BASE && base < G6_WIN_BASE + G6_WIN_SIZE * G6_WINDOWS) {
++		lck_mtx_lock(&g6_lock);
++		g6_win_used &= ~(1u << ((base - G6_WIN_BASE) / G6_WIN_SIZE));
++		lck_mtx_unlock(&g6_lock);
++	}
++}
++
++int
++sweet_gpu_map_at(uint64_t iova, const uint64_t *pages, uint32_t npages)
++{
++	return bonito_gpu_map_pages(iova, pages, npages, PAGE_SIZE);
++}
++
++void
++sweet_gpu_unmap_at(uint64_t iova, uint64_t len)
++{
++	bonito_gpu_unmap(iova, len);
++}
++
++/* up to 16 IBs in order; the fence of the last (0: the GPU is not usable) */
++uint32_t
++sweet_gpu_submit_v2(const uint64_t *iova, const uint32_t *dwords, unsigned n, bool *busy)
++{
++	if (busy) {
++		*busy = false;
++	}
++	for (unsigned i = 0; i < n; i++) {
++		int rc = bonito_gpu_submit(iova[i], dwords[i], 2000);
++		if (rc != 0 && rc != -2) {
++			return 0;
++		}
++	}
++	return __atomic_load_n(&g6_fence, __ATOMIC_RELAXED);
++}
++
++bool
++sweet_gpu_lost(uint64_t *epoch, __unused uint32_t last_fence)
++{
++	if (epoch) {
++		*epoch = 0;
++	}
++	return false;
++}
++
++uint64_t
++sweet_gpu_recoveries(void)
++{
++	return 0;
++}
++
++uint64_t
++sweet_gpu_timestamp(void)
++{
++	return mach_absolute_time();
++}
++
++int
++sweet_gpu_pool_alloc(uint64_t bytes, uint64_t *pa)
++{
++	int rc = -1;
++	bytes = (bytes + PAGE_MASK) & ~(uint64_t)PAGE_MASK;
++	lck_mtx_lock(&g6_lock);
++	for (uint32_t i = 0; i < g6_ext_n; i++) {
++		if (g6_ext[i].len >= bytes) {
++			*pa = g6_ext[i].pa;
++			g6_ext[i].pa += bytes;
++			g6_ext[i].len -= bytes;
++			if (g6_ext[i].len == 0) {
++				memmove(&g6_ext[i], &g6_ext[i + 1], (g6_ext_n - i - 1) * sizeof(g6_ext[0]));
++				g6_ext_n--;
++			}
++			rc = 0;
++			break;
++		}
++	}
++	lck_mtx_unlock(&g6_lock);
++	return rc;
++}
++
++uint64_t
++sweet_gpu_pool_avail(void)
++{
++	uint64_t sum = 0;
++	lck_mtx_lock(&g6_lock);
++	for (uint32_t i = 0; i < g6_ext_n; i++) {
++		sum += g6_ext[i].len;
++	}
++	lck_mtx_unlock(&g6_lock);
++	return sum;
++}
++
++void
++sweet_gpu_pool_free(uint64_t pa, uint64_t bytes)
++{
++	uint32_t i;
++	bytes = (bytes + PAGE_MASK) & ~(uint64_t)PAGE_MASK;
++	lck_mtx_lock(&g6_lock);
++	for (i = 0; i < g6_ext_n && g6_ext[i].pa < pa; i++) {
++	}
++	if (i > 0 && g6_ext[i - 1].pa + g6_ext[i - 1].len == pa) {
++		g6_ext[i - 1].len += bytes;                 /* merge with the previous extent */
++		if (i < g6_ext_n && g6_ext[i - 1].pa + g6_ext[i - 1].len == g6_ext[i].pa) {
++			g6_ext[i - 1].len += g6_ext[i].len;
++			memmove(&g6_ext[i], &g6_ext[i + 1], (g6_ext_n - i - 1) * sizeof(g6_ext[0]));
++			g6_ext_n--;
++		}
++	} else if (i < g6_ext_n && pa + bytes == g6_ext[i].pa) {
++		g6_ext[i].pa = pa;                          /* merge with the next */
++		g6_ext[i].len += bytes;
++	} else if (g6_ext_n < G6_EXTENTS) {
++		memmove(&g6_ext[i + 1], &g6_ext[i], (g6_ext_n - i) * sizeof(g6_ext[0]));
++		g6_ext[i].pa = pa;
++		g6_ext[i].len = bytes;
++		g6_ext_n++;
++	}                                                   /* else: leaked (the table is full) */
++	lck_mtx_unlock(&g6_lock);
++}
++
+ void
+ sweet_gpu615_start(void)
+ {
+@@ -1320,6 +1594,14 @@
+ 	PE_parse_boot_argn("sweetgpufast", &g6_fast, sizeof(g6_fast));
+ 	if (enabled >= 4) {
+ 		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
++	}
++	if (enabled >= 6) {
++		uint32_t mtl = 0, mb = 96;
++		PE_parse_boot_argn("sweetmtl", &mtl, sizeof(mtl));
++		PE_parse_boot_argn("sweetgpupool", &mb, sizeof(mb));
++		if (mtl) {
++			g6_upool_alloc(mb);     /* contiguous GPU memory for userland buffers: claimed now, it cannot be later */
++		}
+ 	}
+ 	if (enabled >= 5) {
+ 		vm_offset_t bva = 0;
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -116,8 +116,6 @@
+ bsd/dev/sweet_poke.c			standard
+ bsd/dev/sweet_files.c			standard
+ bsd/dev/sweet_pmem.c			standard
+-bsd/dev/sweet_a6xx.c			standard
+-bsd/dev/sweet_gpu.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -119,7 +119,7 @@
+ 	setProperty("MetalPluginName", plugin);
+ 	setProperty("MetalPluginClassName", which == 2 ? "SweetMTL2Device" : "SweetMTLDevice");
+ 	setProperty("IOGLBundleName", plugin);
+-	setProperty("model", "Adreno 640");
++	setProperty("model", "Adreno 615");
+ 	setProperty(kIOUserClientClassKey, "SweetAcceleratorUserClient");
+ 	registerService();
+ 	IOLog("SWEET MTL: IOAcceleratorES published (MetalPluginName %s)\n", plugin);
+@@ -413,8 +413,8 @@
+ 		if (args->scalarOutputCount < 3) {
+ 			return kIOReturnBadArgument;
+ 		}
+-		out[0] = 640;
+-		out[1] = 0x06040001;
++		out[0] = 615;
++		out[1] = 0x06010500;
+ 		out[2] = sweet_gpu_ready();
+ 		return kIOReturnSuccess;
+ 	case 1: {
+@@ -662,17 +662,17 @@
+ 	}
+ 	case NativeAdrenoMethodGetDeviceInfo: {
+ 		V2_OUT(NativeAdrenoAbiDeviceInfo);
+-		/* what bsd/dev/sweet_a6xx.c's hw_init programs: GMEM 1 MB at 0x100000, UBWC 3 (hbb 15, lvl 2+3 swizzle) */
+-		rp->chip_id = 0x06040001;
+-		rp->gmem_bytes = 0x100000;
++		/* Adreno 615 (bonito, bsd/dev/bonito_gpu.c): GMEM 512 KB at 0x100000, UBWC 2, highest bank bit 14 */
++		rp->chip_id = 0x06010500;
++		rp->gmem_bytes = 0x80000;
+ 		rp->gmem_base = 0x100000;
+ 		rp->uche_trap_base = 0x1fffffffff000ULL;
+ 		rp->va_start = fWinBase;
+ 		rp->va_size = fWinSize;
+-		rp->highest_bank_bit = 15;
++		rp->highest_bank_bit = 14;
+ 		rp->ubwc_swizzle = 0x6;
+ 		rp->macrotile_mode = 0;
+-		rp->ubwc_version = 3;
++		rp->ubwc_version = 2;
+ 		rp->flags = NativeAdrenoDeviceClientIova;
+ 		return kIOReturnSuccess;
+ 	}
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -41,7 +41,7 @@
+ 
+ /* bsd/dev/sweet_gpu.c: the Adreno 640's 2D engine scales each frame onto the panel (boot-arg sweetgpu=1). */
+ extern "C" {
+-bool sweet_gpu_ready(void);
++bool sweet_gpu_fb_ready(void);          /* the Pixel 4 composites with the GPU; bonito keeps the CPU path (bsd/dev/bonito_gpu.c) */
+ int sweet_gpu_surface_slot(uint64_t key);
+ int sweet_gpu_map_surface(uint64_t key, const uint64_t *pages, uint32_t npages, uint32_t page_size);
+ int sweet_gpu_present(int slot, uintptr_t kva, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch,
+@@ -704,7 +704,7 @@
+ 		}
+ 	}
+ 
+-	if (sweet_gpu_ready() && presentGPU(rec)) {
++	if (sweet_gpu_fb_ready() && presentGPU(rec)) {
+ 		return;
+ 	}
+ 	if (presentFit(rec)) {
