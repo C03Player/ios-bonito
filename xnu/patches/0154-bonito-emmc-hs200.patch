@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -446,5 +446,273 @@
+@@ -446,5 +446,282 @@
  	return ENOENT;
  }
 +
@@ -204,8 +204,9 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	return (best_start + i) & 15;
 +}
 +
++/* stage: 1 baseline + CMD6 + clock + DLL init, 2 + tuning, 3 + verification (active). A lower stage stops there and returns an error. */
 +static int
-+emmc_hs200(void)
++emmc_hs200(int stage)
 +{
 +	static uint64_t base[HS200_CHUNKS];
 +	uint32_t good = 0, i;
@@ -242,6 +243,10 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	if (!hs200_dll_init()) {
 +		return -5;
 +	}
++	if (stage < 2) {
++		printf("SWEET EMMC: HS200 stage 1 done (DLL locked at 200 MHz); stopping here\n");
++		return -90;
++	}
 +	for (i = 0; i < 16; i++) {
 +		if (!hs200_set_phase(i)) {
 +			printf("SWEET EMMC: HS200: DLL phase %u would not set\n", i);
@@ -259,6 +264,10 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	if (phase < 0 || !hs200_set_phase((unsigned)phase)) {
 +		return -7;
 +	}
++	if (stage < 3) {
++		printf("SWEET EMMC: HS200 stage 2 done (tuned, phase %d); stopping here\n", phase);
++		return -91;
++	}
 +	for (int rep = 0; rep < 3; rep++) {
 +		for (i = 0; i < HS200_CHUNKS; i++) {
 +			uint64_t h = 0;
@@ -275,14 +284,14 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  
  static int
  ufs_take_over_host(void)
-@@ -523,6 +791,15 @@
+@@ -523,6 +800,15 @@
  		sd_wr8(SD_HCTL, sd_rd8(SD_HCTL) | 0x20);
  		delay(2000);
  		printf("SWEET EMMC: 8-bit high speed, 50 MHz\n");
 +		{
 +			int want_hs200 = 0;
 +			PE_parse_boot_argn("sweeths200", &want_hs200, sizeof(want_hs200));
-+			if (want_hs200 && !emmc_hs200_failed && emmc_hs200()) {
++			if (want_hs200 && !emmc_hs200_failed && emmc_hs200(want_hs200)) {
 +				printf("SWEET EMMC: HS200 failed; starting over at high speed\n");
 +				emmc_hs200_failed = true;
 +				return ufs_take_over_host();
