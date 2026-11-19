@@ -1,10 +1,29 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -446,5 +446,356 @@
+@@ -278,6 +278,8 @@
+  * Data transfer between the card and the bounce buffer through 32-bit ADMA2 (the descriptor table is in the
+  * DMA window too). blocks 1..BOUNCE_SIZE/512. multi: CMD18/CMD25 with block count and auto CMD12.
+  */
++static bool emmc_hs200_recover(void);
++
+ static int
+ emmc_data_cmd(uint32_t index, uint32_t arg, uint32_t blocks, bool write, bool multi)
+ {
+@@ -309,6 +311,9 @@
+ 	if (error) {
+ 		printf("SWEET EMMC: %s of %u blocks at 0x%x failed (%d, int 0x%x, adma err 0x%x)\n",
+ 		    write ? "write" : "read", blocks, arg, error, sd_rd32(SD_INT), sd_rd32(SD_ADMA_ERR));
++		if (emmc_hs200_recover()) {
++			return emmc_data_cmd(index, arg, blocks, write, multi);         /* once more, at 50 MHz */
++		}
+ 		return EIO;
+ 	}
+ 	if (write) {
+@@ -446,6 +451,375 @@
  	return ENOENT;
  }
-+
+ 
 +/*
 + * HS200 (200 MHz, 8-bit SDR), boot-arg sweeths200=1 (default off). Qualcomm SDCC5 (sdhci-msm.c, msm_init_cm_dll /
 + * msm_config_cm_dll_phase / msm_find_most_appropriate_phase / sdhci_msm_execute_tuning): the host samples read data through a
@@ -32,6 +51,8 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +#define HS200_CHUNKS    16u
 +
 +static bool emmc_hs200_failed;
++static bool hs200_active;
++static uint16_t hs200_hctl2_saved;
 +static int hs200_dll_limit;        /* sweeths200=4N: stop hs200_dll_init after section N (bisecting a hang) */
 +
 +static uint64_t
@@ -247,6 +268,20 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	printf("SWEET EMMC: HS200 restore: HS_TIMING back to 1: %d\n", emmc_switch(185, 1));
 +}
 +
++/* A data command failed while HS200 runs: go back to 50 MHz high speed (no tuning needed) and let the caller retry. */
++static bool
++emmc_hs200_recover(void)
++{
++	if (!hs200_active) {
++		return false;
++	}
++	hs200_active = false;
++	printf("SWEET EMMC: HS200 error: falling back to 50 MHz high speed\n");
++	emmc_reset_lines();
++	hs200_restore(true, hs200_hctl2_saved);
++	return true;
++}
++
 +/* stage: 1 baseline read only, 2 + CMD6, 3 + clock source/signalling/internal clock, 4 + DLL init, 5 + tuning, 6 + verification (active). A lower
 + * stage stops there (the caller then re-initialises at 50 MHz) so a hang can be located. */
 +static int
@@ -260,6 +295,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		stage = 4;
 +	}
 +	uint16_t hctl2 = sd_rd16(SD_HCTL2);
++	hs200_hctl2_saved = hctl2;
 +
 +	if (stage == 9) {       /* probe: the hook alone */
 +		printf("SWEET EMMC: HS200 probe 9: returning success at once\n");
@@ -351,14 +387,16 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +			}
 +		}
 +	}
++	hs200_active = true;
 +	printf("SWEET EMMC: HS200 active: 8-bit, 200 MHz, phase %d, 16 MiB verified three times\n", phase);
 +	return 0;
 +}
 +
- 
++
  static int
  ufs_take_over_host(void)
-@@ -523,6 +874,15 @@
+ {
+@@ -523,6 +897,15 @@
  		sd_wr8(SD_HCTL, sd_rd8(SD_HCTL) | 0x20);
  		delay(2000);
  		printf("SWEET EMMC: 8-bit high speed, 50 MHz\n");
