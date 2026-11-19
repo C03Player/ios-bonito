@@ -184,3 +184,20 @@ are used, and the pipeline journal on the phone (`/var/local/m2v-cache/backboard
 (AIR -> SPIR-V -> Turnip -> IR3, 90-375 ms each, ok=1). Read from the phone with `bonito/tools/hfsx.py --phone cat PATH OUT` in the log-reading recovery.
 Not seen yet: GPU rendering confirmed on screen, `vktest`/`m2vtest` results (their output goes to /dev/console, not into the kernel log: next time use StandardOutPath files),
 `generateMipmapsForTexture` is refused by metal2vulkan (MipmapGeneration not implemented).
+
+
+## GPU hang with Turnip (2026-11-20, findings so far)
+
+- The userland stack is up (device created, shaders compiled on the phone) but the first real Turnip submit hangs the GPU and nothing recovers it (no hang recovery in
+  `bonito_gpu.c` yet): `ring (work): rptr == wptr, rbbm_status 0x800005 (busy), cp_status_1 0x81004f3e, TIMEOUT`, no SMMU fault, hw_fault 0, protect_status 0.
+  Idle tests (15 s, 30 s, 45 s after init: a plain CP_MEM_WRITE IB) pass, so an idle GPU keeps working; every submit after the first hang fails.
+- The CP consumes the whole IB (`IB1 rem 0` in sysmem mode, `rem 2844` of 3324 in tiled mode) and then the GPU never goes idle, so my tail (WAIT_FOR_IDLE, fence write) never runs.
+  `TU_DEBUG=sysmem` (file `/var/local/mtl2-tu-debug`, first line = TU_DEBUG) does not avoid it: not a binning/GMEM problem.
+- `vktest` creates its Vulkan device (`PASS device created`) but its first submit fails (device already lost after backboardd's hang); its IB starts with
+  `EVENT_WRITE CACHE_INVALIDATE`.
+- Next: `sweetgputest=N` (patch 0161) issues one packet type as the first idle test (1 CACHE_INVALIDATE, 2 CCU invalidate, 3 LRZ_FLUSH, 4/5 events with timestamp, 6 COND_WRITE5, 7 SET_MARKER, 8 WAIT_MEM_WRITES,
+  9 register write, 10 NOP, 11 several events): the one after which the GPU does not idle wedges the A615.
+- Pool policy: ordinary processes may only use the GPU pool beyond `sweetgpureserve` MB (default 160) with `sweetgpucap` MB each (256); with the 192 MB low-RAM pool that leaves nothing,
+  so test programs got `VK_ERROR_OUT_OF_DEVICE_MEMORY`. Boot with `sweetgpureserve=16 sweetgpucap=128`.
+- Live edits of the phone's volume: `bonito/tools/hfsx_write.py adb:/dev/block/mmcblk0p72 ...` in the recovery after a `sweetnoinit=1` boot (xnu 0159: replays and flushes the journal, unmounts, resets).
+  Drop the recovery's caches (`adb shell 'echo 3 > /proc/sys/vm/drop_caches'`) before reading back through the mass-storage LUN.
