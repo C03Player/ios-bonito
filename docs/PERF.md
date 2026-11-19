@@ -92,3 +92,14 @@ snooped: every XNU PTE here is Outer Shareable, SH=2, and the SoC may only keep 
 helps, and the entry becomes visible when the stale line is evicted at some random later time. Experiments `sweetsampletlbi=5` (flush every CPU's data
 cache with an xcall) and `=6` (`dc civac` of the descriptor on the stuck CPU) test exactly that. If it holds, the fix is inner shareable PTEs
 (and TCR_EL1.SH0/SH1) in the arm64 pmap.
+
+## HS200 is not stable over time (first hands-on boot, 2026-11-19 16:00)
+
+A hands-on boot with `sweeths200=6` and no auto restart ran 14 minutes (78 s to 936 s), then the eMMC started failing every command with error -1
+(the error interrupt 0x8000 is cleared before the message reads it, hence `int 0x0`): first a write of 8 blocks at 0x1f90168 (925.5 s), then everything.
+Processes could not page in code, got SIGBUS ("Too many corpses being created"), launchd died with SIGBUS and the kernel panicked
+(`initproc exited -- exit reason namespace 2 subcode 0xa`). 50 MHz high speed never did this in earlier long runs, so the single tuning at boot is not
+enough once the card warms up (the sampling phase drifts), and the in-place fallback in `emmc_data_cmd` did NOT trigger: no "HS200 error: falling back"
+line anywhere in the log although the kernel contains the string and `HS200 active` was printed at 77 s. Next: print `hs200_active` in the failure path,
+and add a retune (re-run the 16-phase tuning) before falling back. HS200 stays off by default (`sweeths200=0`), the hands-on image is
+`bonito/tools/boot-manual.sh RUN_ID sweeths200=0`.
