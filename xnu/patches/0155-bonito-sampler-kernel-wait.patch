@@ -1,0 +1,15 @@
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1040,6 +1040,11 @@
+ 			fp = frame[0];
+ 		}
+ 		printf("%s\n", line);
++		/* what the thread is blocked in: the syscall (x16: negative = Mach trap) and its first arguments, then the kernel's wait */
++		printf("SMP %s t%d x16 %lld x0 0x%llx x1 0x%llx x2 0x%llx | kernel: state 0x%x hint %d event 0x%llx cont 0x%llx wait_result %d\n",
++		    name, tn - 1, (long long)get_saved_state_reg(ss, 16), get_saved_state_reg(ss, 0), get_saved_state_reg(ss, 1),
++		    get_saved_state_reg(ss, 2), (unsigned)thread->state, (int)thread->block_hint, (unsigned long long)thread->wait_event,
++		    (unsigned long long)(uintptr_t)thread->continuation, (int)thread->wait_result);
+ 	}
+ 	task_unlock(task);
+ }
