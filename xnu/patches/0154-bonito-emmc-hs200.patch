@@ -1,10 +1,10 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -446,85 +446,327 @@
+@@ -446,5 +446,331 @@
  	return ENOENT;
  }
- 
++
 +/*
 + * HS200 (200 MHz, 8-bit SDR), boot-arg sweeths200=1 (default off). Qualcomm SDCC5 (sdhci-msm.c, msm_init_cm_dll /
 + * msm_config_cm_dll_phase / msm_find_most_appropriate_phase / sdhci_msm_execute_tuning): the host samples read data through a
@@ -46,31 +46,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	return h;
 +}
 +
- static int
--ufs_take_over_host(void)
--{
--	/* SDCC1 apps clock: GPLL0_OUT_MAIN (source 1) / 6 = 100 MHz, bypass M/N */
--	gcc_wr(GCC_APPS_CBCR, gcc_rd(GCC_APPS_CBCR) | 1);
--	gcc_wr(GCC_AHB_CBCR, gcc_rd(GCC_AHB_CBCR) | 1);
--	gcc_wr(GCC_CFG_RCGR, (1u << 8) | (2 * 6 - 1));
--	gcc_wr(GCC_CMD_RCGR, 0x3);              /* UPDATE | ROOT_EN */
--	uint64_t deadline;
--	nanoseconds_to_absolutetime(10ull * NSEC_PER_MSEC, &deadline);
--	deadline += mach_absolute_time();
--	while (gcc_rd(GCC_CMD_RCGR) & 1) {
--		if (mach_absolute_time() > deadline) {
--			printf("SWEET EMMC: GCC SDCC1 clock update stuck\n");
--			return EIO;
--		}
--	}
--	sd_wr32(MSM_HC_MODE, 1);
--	sd_wr8(SD_RST, 1);
--	if (!sd_wait8(SD_RST, 1, 0, 100ull * NSEC_PER_MSEC)) {
--		printf("SWEET EMMC: controller reset stuck\n");
--		return EIO;
--	}
--	sd_wr32(MSM_HC_MODE, 1);
--	sd_wr32(MSM_VENDOR_SPEC, sd_rd32(MSM_VENDOR_SPEC) | VS_IO_PAD_EN);
++static int
 +hs200_read_hash(uint32_t chunk, uint64_t *h)
 +{
 +	int e = ufs_read_blocks(HS200_LBA + (uint64_t)chunk * (BOUNCE_SIZE / UFS_BLOCK), BOUNCE_SIZE / UFS_BLOCK);
@@ -300,61 +276,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		return -3;
 +	}
 +	sd_wr16(SD_HCTL2, (uint16_t)((sd_rd16(SD_HCTL2) & ~7u) | 3u | 8u));    /* SDR104 mode (HS200), 1.8 V signalling */
- 	emmc_pwr_ack();
--	sd_wr8(SD_PWR, 0x0b);                   /* 1.8 V, power on */
--	emmc_pwr_ack();
--	sd_wr32(MSM_VENDOR_SPEC, sd_rd32(MSM_VENDOR_SPEC) | VS_IO_PAD_SW);
--	if (emmc_set_clock(125)) {              /* 400 kHz */
--		printf("SWEET EMMC: internal clock not stable\n");
--		return EIO;
--	}
--	sd_wr8(SD_TOUT, 0xe);
--	sd_wr32(SD_INTEN, 0x01ff00ff);
--	sd_wr32(SD_SIGEN, 0);                   /* polled */
--	delay(2000);
--
--	uint32_t r[4] = { 0 };
--	(void)emmc_cmd(0, 0, CF(R_NONE, 0, 0, 0), NULL);
--	delay(2000);
--	int e = -1;
--	for (int i = 0; i < 200; i++) {
--		e = emmc_cmd(1, 0x40ff8080, CF(R_48, 0, 0, 0), r);
--		if (!e && (r[0] & 0x80000000u)) {
--			break;
--		}
--		delay(10000);
--	}
--	if (e || !(r[0] & 0x80000000u)) {
--		printf("SWEET EMMC: no card (CMD1 %d)\n", e);
--		return ENXIO;
--	}
--	su.hc = !!(r[0] & 0x40000000u);
--	if (emmc_cmd(2, 0, CF(R_136, 1, 0, 0), r)) {
--		return EIO;
--	}
--	printf("SWEET EMMC: CID %08x %08x %08x %08x\n", r[3], r[2], r[1], r[0]);
--	su.rca = 1;
--	if (emmc_cmd(3, su.rca << 16, CF(R_48, 1, 1, 0), r) ||
--	    emmc_cmd(7, su.rca << 16, CF(R_48B, 1, 1, 0), r) || emmc_wait_tc(500ull * NSEC_PER_MSEC)) {
--		return EIO;
--	}
--	/* high speed, 8-bit bus, 50 MHz (verified on the phone: ~44 MB/s) */
--	e = emmc_switch(185, 1);
--	if (!e) {
--		e = emmc_set_clock(1);
--		sd_wr8(SD_HCTL, sd_rd8(SD_HCTL) | 0x04);
--		delay(2000);
--	}
--	if (!e) {
--		e = emmc_switch(183, 2);
--	}
--	if (!e) {
--		sd_wr8(SD_HCTL, sd_rd8(SD_HCTL) | 0x20);
--		delay(2000);
--		printf("SWEET EMMC: 8-bit high speed, 50 MHz\n");
--	} else {
--		printf("SWEET EMMC: staying at 1-bit 400 kHz (switch error %d)\n", e);
--	}
++	emmc_pwr_ack();
 +	delay(5000);
 +	if (emmc_set_clock(0)) {                                /* divider 0: the 200 MHz base clock */
 +		printf("SWEET EMMC: HS200: internal clock not stable\n");
@@ -405,5 +327,25 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		}
 +	}
 +	printf("SWEET EMMC: HS200 active: 8-bit, 200 MHz, phase %d, 16 MiB verified three times\n", phase);
- 	return 0;
- }
++	return 0;
++}
++
+ 
+ static int
+ ufs_take_over_host(void)
+@@ -523,6 +849,15 @@
+ 		sd_wr8(SD_HCTL, sd_rd8(SD_HCTL) | 0x20);
+ 		delay(2000);
+ 		printf("SWEET EMMC: 8-bit high speed, 50 MHz\n");
++		{
++			int want_hs200 = 0;
++			PE_parse_boot_argn("sweeths200", &want_hs200, sizeof(want_hs200));
++			if (want_hs200 && !emmc_hs200_failed && emmc_hs200(want_hs200)) {
++				printf("SWEET EMMC: HS200 failed; starting over at high speed\n");
++				emmc_hs200_failed = true;
++				return ufs_take_over_host();
++			}
++		}
+ 	} else {
+ 		printf("SWEET EMMC: staying at 1-bit 400 kHz (switch error %d)\n", e);
+ 	}
