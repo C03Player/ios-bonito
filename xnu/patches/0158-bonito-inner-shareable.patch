@@ -1,0 +1,24 @@
+diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -989,9 +989,9 @@
+ #endif /* CONFIG_KERNEL_TBI */
+ 
+ #define TCR_EL1_BASE \
+-	(TCR_IPS_VALUE | TCR_SH0_OUTER | TCR_ORGN0_WRITEBACK |         \
++	(TCR_IPS_VALUE | TCR_SH0_INNER | TCR_ORGN0_WRITEBACK |         \
+ 	 TCR_IRGN0_WRITEBACK | (T0SZ_BOOT << TCR_T0SZ_SHIFT) |          \
+-	 TCR_SH1_OUTER | TCR_ORGN1_WRITEBACK | \
++	 TCR_SH1_INNER | TCR_ORGN1_WRITEBACK | \
+ 	 TCR_IRGN1_WRITEBACK | (TCR_TG1_GRANULE_SIZE) |                 \
+ 	 TCR_TBI0_TOPBYTE_IGNORED | (TCR_TBID0_ENABLE) | TCR_E0PD_VALUE | \
+ 	 TCR_EL1_DTBI)
+@@ -1147,7 +1147,7 @@
+ #define SH_NONE         0x0 /* Non shareable  */
+ #define SH_NONE         0x0 /* Device shareable */
+ #define SH_DEVICE       0x2 /* Normal memory Inner non shareable - Outer non shareable */
+-#define SH_OUTER_MEMORY 0x2 /* Normal memory Inner shareable - Outer shareable */
++#define SH_OUTER_MEMORY 0x3 /* bonito: Inner Shareable (was 0x2, Outer): the Kryo 360 cores and their table walkers only keep Inner Shareable memory coherent between cores (0158) */
+ #define SH_INNER_MEMORY 0x3 /* Normal memory Inner shareable - Outer non shareable */
+ 
+ 
