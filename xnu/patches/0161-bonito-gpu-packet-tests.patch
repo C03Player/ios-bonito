@@ -1,0 +1,113 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1126,6 +1126,83 @@
+ }
+ 
+ /*
++ * boot-arg sweetgputest=N (patch 0161): at the first idle test (about 20 s after boot, before backboardd uses the GPU) the IB is not a plain
++ * memory write but one packet type that Turnip's command streams use; the standard tail (WAIT_FOR_IDLE and the fence write) follows as always.
++ * If the GPU never idles afterwards, that packet is the one that wedges an A615 here. Returns the number of dwords of the test IB.
++ *   1 EVENT_WRITE CACHE_INVALIDATE   2 PC_CCU_INVALIDATE_DEPTH + COLOR   3 LRZ_FLUSH   4 CACHE_FLUSH_TS (with timestamp)
++ *   5 PC_CCU_FLUSH_COLOR_TS (with timestamp)   6 COND_WRITE5 polling a VSC register   7 SET_MARKER (bypass)   8 WAIT_MEM_WRITES + WAIT_FOR_ME
++ *   9 type-4 register write (RB_CCU_CNTL)   10 NOP packet   11 all the events of 1-3 in a row
++ */
++static unsigned
++g6_test_ib(unsigned sel, uint32_t *ib, uint64_t ts_va)
++{
++	unsigned n = 0;
++#define EVT(e) do { ib[n++] = g6_pkt7(0x46, 1); ib[n++] = (e); } while (0)
++#define EVT_TS(e) do { ib[n++] = g6_pkt7(0x46, 4); ib[n++] = (e); ib[n++] = (uint32_t)ts_va; ib[n++] = (uint32_t)(ts_va >> 32); ib[n++] = 0x7e57u; } while (0)
++	switch (sel) {
++	case 1:
++		EVT(0x31);
++		break;
++	case 2:
++		EVT(0x18);
++		EVT(0x19);
++		break;
++	case 3:
++		EVT(0x25);
++		break;
++	case 4:
++		EVT_TS(0x04);
++		break;
++	case 5:
++		EVT_TS(0x20);
++		break;
++	case 6:
++		ib[n++] = g6_pkt7(0x45, 8);
++		ib[n++] = 0x105;
++		ib[n++] = 0xc64;
++		ib[n++] = 0;
++		ib[n++] = 0x4000;
++		ib[n++] = 0xffffffffu;
++		ib[n++] = (uint32_t)ts_va;
++		ib[n++] = (uint32_t)(ts_va >> 32);
++		ib[n++] = 0x7e57u;
++		break;
++	case 7:
++		ib[n++] = g6_pkt7(0x65, 1);
++		ib[n++] = 0x10;
++		break;
++	case 8:
++		ib[n++] = g6_pkt7(0x12, 0);
++		ib[n++] = g6_pkt7(0x13, 0);
++		break;
++	case 9: {
++		/* type-4 packet: 1 dword to register 0x8e07 (RB_CCU_CNTL), odd parity bits as in a6xx's pm4 */
++		uint32_t reg = 0x8e07, cnt = 1;
++		ib[n++] = 0x40000000u | cnt | (g6_parity(cnt) << 7) | (reg << 8) | (g6_parity(reg) << 27);
++		ib[n++] = 0x10000000u;
++		break;
++	}
++	case 10:
++		ib[n++] = g6_pkt7(0x10, 1);
++		ib[n++] = 0;
++		break;
++	case 11:
++		EVT(0x31);
++		EVT(0x18);
++		EVT(0x19);
++		EVT(0x25);
++		break;
++	default:
++		break;
++	}
++#undef EVT
++#undef EVT_TS
++	return n;
++}
++
++static unsigned g6_testsel;
++
++/*
+  * Hang diagnostics (patch 0160): where is the command processor stuck? Reads the CP's IB1/IB2 position and the protect status, and dumps
+  * the dwords of the last submitted IB around the packet it stopped in (the IB's pages are found with our own page table walk and mapped
+  * once, write-combined; this only runs on a hang, three times at most).
+@@ -1397,6 +1474,17 @@
+ 		int rc;
+ 
+ 		(void)tsleep(&g6_chan, PZERO, "g6idle", hz * 15);
++		uint32_t tib[24], tn = 0;
++
++		if (n == 1 && g6_testsel) {
++			tn = g6_test_ib(g6_testsel, tib, G6_GVA_POOL + G6_OFF_SCRATCH + 0x40);
++		}
++		if (tn) {
++			g6_pwrite(G6_OFF_TEST_IB, tib, 4u * tn);
++			rc = bonito_gpu_submit(G6_GVA_POOL + G6_OFF_TEST_IB, tn, 300);
++			printf("SWEET GPU615: idle test %u: PACKET TEST %u (%u dwords): submit rc %d\n", n, g6_testsel, tn, rc);
++			continue;
++		}
+ 		ib[0] = g6_pkt7(G6_CP_MEM_WRITE, 3);
+ 		ib[1] = (uint32_t)va;
+ 		ib[2] = (uint32_t)(va >> 32);
+@@ -1710,6 +1798,7 @@
+ 		g6_fast = 1;
+ 	}
+ 	PE_parse_boot_argn("sweetgpufast", &g6_fast, sizeof(g6_fast));
++	PE_parse_boot_argn("sweetgputest", &g6_testsel, sizeof(g6_testsel));
+ 	if (enabled >= 4) {
+ 		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
+ 	}
