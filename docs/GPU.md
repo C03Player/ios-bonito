@@ -133,3 +133,22 @@ user client. Mesa has supported A615 in Turnip since 2020, so the Vulkan route a
 2. Kernel driver and accelerator service (port 0095..0097 and the later fixes), publish `AGXAccelerator`/IOAcceleratorES.
 3. Userland: first the flame SweetMetal path to get Core Animation drawing on the GPU, then metal2vulkan + Turnip.
 4. Wallpapers (Astronomy/Collections) and apps as the acceptance test.
+
+
+## IOKit access (patch 0156, 2026-11-19)
+
+The kernel tree already had the Pixel 4's `SweetAccelerator.cpp`: it publishes `IOAcceleratorES` (the class Metal.framework iterates in
+`MTLRegisterDevices`) plus a user client (info, buffer alloc/free, IOSurface import, submit, fences; v1 ABI for SweetMetal and the v2
+"NativeAdreno" ABI that Mesa Turnip's darwin backend speaks) on top of a `sweet_gpu_*` kernel API. Patch 0156 backs that API with the Adreno 615
+driver (`bsd/dev/bonito_gpu.c`) instead of the Pixel 4's `sweet_gpu.c`/`sweet_a6xx.c` (no longer built):
+
+- boot-args: `sweetgpu=6` (GPU service), `sweetmtl=1` (SweetMetal ABI) or `sweetmtl=2` (Turnip ABI; plugin SweetMetal2), `sweetgpupool=MB` (default 96).
+- userland buffers come from a physically contiguous pool claimed at boot (`kmem_alloc_contig`, 96 MiB, flushed once, then only WC/GPU access);
+  per-client 4 GiB GPU VA windows from 64 GiB up; submits are synchronous (fence complete on return); a GPU fault is cleared and reported.
+- the accelerator reports Adreno 615: chip id 0x06010500, GMEM 512 KB, UBWC 2, highest bank bit 14.
+- the framebuffer keeps the CPU composition path (`sweet_gpu_fb_ready()` is false); the GPU scale-to-fit blit is Pixel 4 only.
+
+Verified on the phone: with `sweetgpu=6 sweetmtl=1`, backboardd and SpringBoard match `IOAcceleratorES` -> `SweetAccelerator` (before: 0 found). The user pool
+was claimed (`user pool 96 MiB`). NOT verified yet: any user client call (there is no userland client on the phone), the GPU being ready when one connects
+(stage A only starts 60 s after boot), and Metal itself: Metal looks for `/System/Library/Extensions/SweetMetal(2).bundle`, which does not exist on the root image.
+Limits: the page-table arena is inside the 4 MiB pool (about 380 L3 tables, roughly 760 MB of mapped GPU memory).
