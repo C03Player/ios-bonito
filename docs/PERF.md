@@ -21,3 +21,27 @@ lock), then for each of 16 grey-coded phases send CMD21 (128-byte block for an 8
 middle of the longest run of good phases. Safety plan: read a 16 MiB region at 50 MHz first, hash it, switch to HS200, tune, read it again and
 compare several times; on any mismatch redo the whole controller init without HS200. Writes only ever go to the partition, and the first
 HS200 session verifies a scratch write/read in the unused part of userdata.
+
+
+## eMMC HS200 (patch 0154, boot-arg `sweeths200=6`, default off)
+
+Verified on the phone (2026-11-19): SDCC version 0x1000006c (major 1, minor 0x6c = low byte, so the updated DLL reset is used),
+DLL locks at 200 MHz, CMD21 tuning finds good phases 0xdfff / 0xffff and picks phase 8, 16 MiB at LBA 0x400000 reads back identical
+three times. Reads reach 35-41 MB/s while busy (50 MHz high speed: ~22 MB/s). launchd boot tasks that took 20-50 s now take ~3 s
+and SpringBoard starts about 45 s after the kernel (it used to be 100+ s), when the boot does not hit the process stall below.
+
+How it was found (all in the patch): `sweeths200=N` runs only the first N steps (1 baseline read, 2 CMD6, 3 clock, 4 DLL, 5 tuning,
+6 everything); 41-45 stop inside the DLL sequence; 8 and 9 are probes of the failure path. The stages restore 50 MHz in place and
+succeed, because the failure path itself is broken: starting over with a full `ufs_take_over_host()` after a failed HS200 attempt
+hangs the phone (probe 8; only the watchdog gets it back; cause not found). A data command that fails while HS200 runs now falls back to
+50 MHz high speed in place (`emmc_hs200_recover`) and retries once.
+
+Lessons: the SDCC minor version is `MCI_VERSION & 0xff`; a hang before the log thread starts leaves no log at all (the recovery then
+shows the previous boot's ring: compare with `cmp` against an older log); the ring log mixes boots (find the last `SWEET EMMC: CID`).
+
+## Process stall (not storage)
+
+Independent of HS200 a boot sometimes stops for 15-175 s at one launchd boot task with the eMMC idle (`dirs_cleaner`,
+`FinishRestoreFromBackup`, `usermanagerd` seen). `sweetsample=*` (patch 0152) shows the stalled process has ONE thread, always at
+the same user pc 0x1e4ff7e0c (a syscall stub) with the same caller: it is blocked before main(). Patch 0155 adds the syscall number
+and kernel wait state to the sample to find what it waits for.
