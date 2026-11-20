@@ -15,6 +15,10 @@ concurrency:
   group: userland-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   build:
     runs-on: macos-15
@@ -35,8 +39,24 @@ jobs:
       - name: Sources
         run: sh bonito/userland/setup-sources.sh
 
+      # If bonito/userland/turnip-prebuilt-run names an earlier run of this workflow, its Turnip library is reused instead of rebuilt (the Turnip
+      # sources, patches and pins are unchanged between most pushes, which only touch the Metal plugin or the bridge; and a runner image update
+      # on 2026-11-18 broke the Turnip build itself: ir3_lexer.c fails with UTIL_ARCH_* / PIPE_FORMAT_* errors, to be looked at separately).
+      # Every build uploads the library again, so the chain of reused libraries does not expire (artifact retention is 14 days).
       - name: Turnip for iOS
-        run: sh bonito/userland/tools/build-turnip-ios.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f bonito/userland/turnip-prebuilt-run ]; then
+            RUN=$(tr -d '[:space:]' < bonito/userland/turnip-prebuilt-run)
+            echo "reusing the Turnip library of run $RUN"
+            mkdir -p prebuilt bonito/userland/work/turnip/build-ios/src/freedreno/vulkan
+            gh run download "$RUN" --repo "$GITHUB_REPOSITORY" -n userland-gpu -D prebuilt
+            cp prebuilt/libvulkan_freedreno.dylib bonito/userland/work/turnip/build-ios/src/freedreno/vulkan/
+            ls -la bonito/userland/work/turnip/build-ios/src/freedreno/vulkan/
+          else
+            sh bonito/userland/tools/build-turnip-ios.sh
+          fi
 
       - name: metal2vulkan bridge
         run: sh bonito/userland/tools/build-m2v-bridge.sh
