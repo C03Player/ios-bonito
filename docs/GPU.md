@@ -232,3 +232,12 @@ Boot-args `cpus=8 sweetgpu=6 sweetmtl=2 sweetgpudelay=5 sweetreboot=600`, only W
   the wrong 16K-run GPU page-table entries let the GPU write into arbitrary physical pages (BoImport buffers are managed RAM), which can
   corrupt kernel or user memory. To be confirmed over several boots before calling the stall fixed.
 - The screenshot pulled from the recovery (SHOT=1) shows stale console text from an earlier boot, not the live UI; the display can only be judged by eye.
+
+### Correction (2026-11-20 02:22, logs/ui168d.txt): the multi-core stall is NOT fixed
+
+A second cpus=8 boot with the same kernel: SpringBoard only at 427 s (86 s in the first boot), the log nearly empty from about 100 s to 400 s
+(the stall), and the log ended at 714 s without the timed reset line (the 25 s SoC watchdog reset the phone). So the stall is independent
+of the GPU page-table bug; the "GPU writes into wrong pages" idea above was a hypothesis and did not hold. Treat the first boot's 86 s as the lucky case.
+
+AegirPoster is refused its buffer by the pool policy ("the compositor's reserve": 96 MB of the 192 MB pool free, reserve default 160 MB),
+which Metal reports as `OutOfMemory(Device)`; `sweetgpureserve=32 sweetgpucap=128` lets it through.
