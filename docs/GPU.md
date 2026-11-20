@@ -375,3 +375,16 @@ submits (the driver waits for the GPU after every IB; a call with up to 16 IBs c
 - Userland CI: the Turnip build broke on the 2026-11-18 runner image (ir3_lexer.c.o: UTIL_ARCH_LITTLE_ENDIAN unset, PIPE_FORMAT_* undeclared; Xcode 16.4, rustc 1.98, brew tools float). Workaround:
   bonito/userland/turnip-prebuilt-run names an earlier run whose Turnip library the workflow reuses (the library is byte-identical to the one that was verified on the phone).
 - Disk: the container fills up (test images, CI downloads); tests then die silently. `df -h /` before long sweeps; regenerable: bonito/shim/out/*.img, work/*.payload, work/ci-*, scratchpad downloads.
+
+### Asynchronous GPU submits (0180, 0181; 2026-11-21, kernel run 44818193116; logs/ay1-4, as1)
+
+Why: during animation backboardd's render thread is busy about 60 % of the time (about 50 ms of encoding as user time, then about 56 ms spinning in the kernel for the GPU, counted as system time) and the
+two phases were strictly one after the other (a frame took about 110 ms commit to complete, the GPU idle half of the time). The client ABI already has Submit and WaitFence methods and a dependency fence on Submit, but the driver completed
+every submit before returning.
+What: a v2 Submit queues its packets (up to 16 IBs behind one CACHE_FLUSH_TS fence) and returns the fence at once; WaitFence waits for the GPU's own fence write (sleeping in 200 us timer steps after 0.4 ms of spinning); unmap, pool free and
+window free wait for the GPU to be idle first; the ring checks free space before it writes; at most 3 batches may be in flight (back-pressure). Boot-arg `sweetgpuasync=0` turns it off.
+Result (windows with 5 or more presents after +130 s, the gesture loop of 0177): presents per 5 s median 42 (mean 42.9, quartiles 34 and 51) against 28 (27.6, 20 and 32) with synchronous submits: about 50 % more frames, 8.4 fps. 4 of 4 boots without panic, hang dump
+or backboardd crash, all final frames coherent.
+The first version (0180) panicked in the first boot (`kmem_alloc ... failed with 3`, five cores at the same pc, false hang dumps): its waiters spun in delay() for the whole wait, several threads kept most cores busy, and poll-style WaitFence calls with tiny timeouts
+were reported as hangs. 0181 fixes exactly that (sleeping waits, hang dump only after a wait of a second or more, back-pressure). Lesson: validate every kernel scheduling change with several boots before a hands-on boot.
+Remaining per-frame costs (all on the render thread): about 50 ms of encoding (user time), the no-copy cache flush (about 7 ms per command buffer), the first use of each pipeline (60 ms on average, up to 1 s).
