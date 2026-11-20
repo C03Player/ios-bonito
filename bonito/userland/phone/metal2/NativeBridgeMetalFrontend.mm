@@ -48,8 +48,8 @@ static Timed gTimePipeline,gTimeLibrary,gTimeFunction,gTimeEncodeToCommit;
 static Timed gTimeWaitScheduled,gTimeWaitCompleted;
 static Timed gTimeResourceWait;
 static std::atomic<uint64_t> gResourceChecks,gResourceSkipped;
-static Timed gTimeSurfaceFlush;
-static std::atomic<uint64_t> gSurfaceFlushBytes,gSurfaceFlushDuplicates;
+static Timed gTimeSurfaceFlush,gTimeNoCopyFlush;
+static std::atomic<uint64_t> gSurfaceFlushBytes,gSurfaceFlushDuplicates,gNoCopyFlushBytes;
 struct EncodedWork {uint32_t passes,draws,dispatches,blits;uint64_t pixels;};
 struct CommitRecord {uint64_t committedUs=0,callbackUs=0,ageUs=0;int64_t scheduledUs=-1;uint32_t index=0;EncodedWork work={};};
 static CommitRecord gCommitRing[32];
@@ -120,6 +120,7 @@ static void waitForResource(id resource);
 @property(nonatomic) MTLResourceOptions options;
 @property(nonatomic,copy) void (^deallocator)(void *,NSUInteger);
 @property(nonatomic) void *wrapped;
+@property(nonatomic) NSUInteger wrappedLength;   // ios-on-pixel: bytes of a caller-owned no-copy buffer, for the CPU cache maintenance below
 @property(nonatomic) IOSurfaceRef surfaceOwner; // keeps a shared import's CPU mapping alive
 @property(nonatomic,strong) id<MTLHeap> parentHeap;   // the heap that made the buffer, nil otherwise
 @property(nonatomic) NSUInteger heapOffset;
@@ -269,6 +270,28 @@ static void flushSurfaces(NSMutableSet *surfaces) {
   const uint64_t began=nowUs();
   sys_dcache_flush(reinterpret_cast<void *>(it->first),it->second);
   gSurfaceFlushBytes+=it->second;gTimeSurfaceFlush.add(began);
+ }
+}
+// ios-on-pixel: the GPU here does not snoop the CPU caches (Apple's are coherent, so Metal clients never clean anything). The surfaces above get their
+// maintenance; caller-owned no-copy buffers (and the textures over them: CoreAnimation draws a layer's pixels on the CPU into such memory) did not, so the GPU
+// could read bytes the CPU had only written into its cache: half-old rows of the status bar. Clean+invalidate each distinct range a command uses, before the
+// GPU reads it (commit) and after it wrote it (finish).
+static void flushNoCopy(NSSet *owners) {
+ if(!owners.count)return;
+ std::vector<std::pair<uintptr_t,size_t>> ranges;
+ for(id owner in owners) {
+  NBBuffer *buffer=nil;
+  if([owner isKindOfClass:[NBBuffer class]])buffer=owner;
+  else if([owner isKindOfClass:[NBTexture class]])buffer=((NBTexture *)owner).buffer;
+  if(buffer && buffer.wrapped && buffer.wrappedLength && !buffer.surfaceOwner)
+   ranges.emplace_back(reinterpret_cast<uintptr_t>(buffer.wrapped),buffer.wrappedLength);
+ }
+ std::sort(ranges.begin(),ranges.end());
+ const auto last=std::unique(ranges.begin(),ranges.end());
+ for(auto it=ranges.begin();it!=last;++it) {
+  const uint64_t began=nowUs();
+  sys_dcache_flush(reinterpret_cast<void *>(it->first),it->second);
+  gNoCopyFlushBytes+=it->second;gTimeNoCopyFlush.add(began);
  }
 }
 static NBTexture *textureOnBuffer(NBBuffer *buffer,MTLTextureDescriptor *d,NSUInteger offset,NSUInteger row,bool surface) {
@@ -901,6 +924,7 @@ static void scheduled(void *context);
 // After completion (or a refusal): invalidate the CPU's view of imported surfaces, then completed handlers, once.
 - (void)finish {
  flushSurfaces(_surfaces);
+ flushNoCopy(_resourceOwners);
  // Actual GPU completion (or a local refusal that never submitted) is the
  // release point. A retained completed command must not pin every old frame.
  [_surfaces removeAllObjects];[_resourceOwners removeAllObjects];
@@ -934,6 +958,7 @@ static void scheduled(void *context);
  @synchronized(gInFlight){[gInFlight addObject:self];}
  if(!self.encodeFailure) {
   flushSurfaces(_surfaces);
+  flushNoCopy(_resourceOwners);
   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
   void *context=(__bridge_retained void *)self;
   if(nmb_command_buffer_on_completed(_handle,completed,context) &&
@@ -1401,7 +1426,7 @@ static char sweetMemoryOwnerKey;
  NmbBuffer *handle=nmb_buffer_new_no_copy(gDevice,pointer,length,options);
  if(!handle){NBLOG(@"native-metal: no-copy buffer refused: %@",lastError());return nil;}
  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;
- buffer.wrapped=pointer;buffer.deallocator=deallocator;
+ buffer.wrapped=pointer;buffer.wrappedLength=length;buffer.deallocator=deallocator;
  return (id<MTLBuffer>)buffer;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
@@ -1720,6 +1745,8 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
  row("J surface cache n=%llu bytes=%llu dup=%llu us=%llu max=%llu",(unsigned long long)gTimeSurfaceFlush.count.load(),
   (unsigned long long)gSurfaceFlushBytes.load(),(unsigned long long)gSurfaceFlushDuplicates.load(),
   (unsigned long long)gTimeSurfaceFlush.total.load(),(unsigned long long)gTimeSurfaceFlush.slowest.load());
+ row("J nocopy cache n=%llu bytes=%llu us=%llu max=%llu",(unsigned long long)gTimeNoCopyFlush.count.load(),
+  (unsigned long long)gNoCopyFlushBytes.load(),(unsigned long long)gTimeNoCopyFlush.total.load(),(unsigned long long)gTimeNoCopyFlush.slowest.load());
  // The runtime's VkPipeline makings (the creation log, METAL2VULKAN_LOG_PIPELINES; they happen at draws, not at the state's creation) and
  // its shader cache: where the driver's compile time goes.
  uint64_t work[10]={};
