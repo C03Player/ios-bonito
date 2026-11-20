@@ -1,0 +1,38 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -696,6 +696,7 @@
+ #define G6_RBBM_STATUS          0x210u
+ #define G6_RBBM_INT_STATUS      0x201u
+ 
++static uint32_t g6_last_ib_dw;      /* patch 0172: used by the slow submit snapshot (tentative definition; the real one is further down) */
+ static int
+ g6_ring(const uint32_t *dw, uint32_t n, const char *what, unsigned timeout_ms)
+ {
+@@ -708,9 +709,26 @@
+ 	}
+ 	g6_wptr = (w + n) % G6_RING_DW;
+ 	g6_wr(G6_GMU(G6_CP_RB_WPTR), g6_wptr);
++	/*
++	 * Patch 0172: a submit that takes over 100 ms (real Turnip frames take up to 1.5 s, an idle test 80 us) logs where the command processor is in
++	 * the IB at 100 ms, 300 ms, 800 ms ... (at most 300 lines per boot) to tell a slow march through the draws from a stall at one packet.
++	 */
++	static unsigned slow_lines;
++	uint64_t slow_t0 = mach_absolute_time(), slow_ns, slow_next_ms = 100;
+ 	for (i = 0; i < timeout_ms * 500; i++) {                /* about 2 us per iteration plus the register reads */
+ 		if (g6_rd(G6_GMU(G6_CP_RB_RPTR)) == g6_wptr && !(g6_rd(G6_GMU(G6_RBBM_STATUS)) & (1u << 23))) {
+ 			break;
++		}
++		if ((i & 0x3ff) == 0x3ff && slow_lines < 300) {
++			absolutetime_to_nanoseconds(mach_absolute_time() - slow_t0, &slow_ns);
++			if (slow_ns / 1000000ull >= slow_next_ms) {
++				slow_next_ms = slow_next_ms * 8 / 3;
++				slow_lines++;
++				printf("SWEET GPU615: slow submit at %llu ms: ib1 %#x%08x rem %u of %u dwords, ib2 rem %u, rbbm_status %#x, cp_status_1 %#x, rptr %#x wptr %#x\n",
++				    (unsigned long long)(slow_ns / 1000000ull), g6_rd(G6_GMU(0x929)), g6_rd(G6_GMU(0x928)), g6_rd(G6_GMU(0x92a)),
++				    g6_last_ib_dw, g6_rd(G6_GMU(0x92d)), g6_rd(G6_GMU(G6_RBBM_STATUS)), g6_rd(G6_GMU(G6_CP_STATUS_1)),
++				    g6_rd(G6_GMU(G6_CP_RB_RPTR)), g6_wptr);
++			}
+ 		}
+ 		delay(2);
+ 	}
