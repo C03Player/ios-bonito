@@ -1,0 +1,32 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -457,7 +457,7 @@
+ 	g6_log_levels("gfx.lvl");
+ 	g6_log_levels("mx.lvl");
+ 	g6_log_levels("cx.lvl");
+-	uint32_t want_lvl = 192;                /* patch 0174: SVS_L1, enough for the 300 MHz default of sweetgpuclk (was 64, LOW_SVS = 180 MHz at most) */
++	uint32_t want_lvl = 256;                /* patches 0174/0175: NOM, enough for the 400 MHz default of sweetgpuclk (was 64, LOW_SVS = 180 MHz at most) */
+ 	PE_parse_boot_argn("sweetgpulvl", &want_lvl, sizeof(want_lvl));
+ 	if (!g6_arc_idx("gfx.lvl", "mx.lvl", want_lvl, &pri, &sec, &vlvl)) {
+ 		printf("SWEET GPU615: C1: no vote indices for level %u; stopping\n", want_lvl);
+@@ -1467,8 +1467,8 @@
+  * Patch 0174: the GPU core clock. The GFX3D clock generator (GPU CC 0x101c cmd, 0x1020 cfg) was left on source 0, the 19.2 MHz crystal (the
+  * clock probe of patch 0173 measured ~10 MHz): every real draw took ~25 ms. The vendor driver never touches it either: the GMU firmware sets it
+  * from the DCVS table sent over HFI, which this driver does not use. Here the RCG is switched to GPLL0 (600 MHz, GCC; source 5 of the
+- * RCG's parent map) with the half-integer divider field 2*div-1. Boot-arg sweetgpuclk=MHz: 200, 300 (default), 400 or 600; 0 leaves the crystal.
+- * The vote level (sweetgpulvl, default 192 = SVS_L1) must cover the frequency: 180 MHz needs 64, 267 needs 128, 355 needs 192, 430 needs 256.
++ * RCG's parent map) with the half-integer divider field 2*div-1. Boot-arg sweetgpuclk=MHz: 200, 300, 400 (default since 0175) or 600; 0 leaves the crystal.
++ * The vote level (sweetgpulvl, default 256 = NOM since 0175) must cover the frequency: 180 MHz needs 64, 267 needs 128, 355 needs 192, 430 needs 256.
+  */
+ #define G6_GCC_GPLL0_VOTE       0x52000u
+ #define G6_GCC_GPU_GPLL0_GATE   0x52004u
+@@ -1477,7 +1477,7 @@
+ static void
+ g6_gpu_clock_up(void)
+ {
+-	uint32_t mhz = 300, field, cfg;
++	uint32_t mhz = 400, field, cfg;
+ 
+ 	PE_parse_boot_argn("sweetgpuclk", &mhz, sizeof(mhz));
+ 	if (mhz == 0) {
