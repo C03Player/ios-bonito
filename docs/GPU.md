@@ -241,3 +241,25 @@ of the GPU page-table bug; the "GPU writes into wrong pages" idea above was a hy
 
 AegirPoster is refused its buffer by the pool policy ("the compositor's reserve": 96 MB of the 192 MB pool free, reserve default 160 MB),
 which Metal reports as `OutOfMemory(Device)`; `sweetgpureserve=32 sweetgpucap=128` lets it through.
+
+## Big pool, wallpapers on the GPU (2026-11-20 03:14, kernel run 44665296319 = patches through 0169, log logs/ui169.txt)
+
+Boot-args `cpus=8 sweetgpu=6 sweetmtl=2 sweetgpudelay=5 sweetgpureserve=32 sweetgpucap=160 sweetreboot=900`; test jobs removed from launchd.plist and
+`/private/var/local/mtl2-clients` = `SpringBoard chronod PosterBoard AegirPoster CollectionsPoster`.
+
+- 0169: the user pool starts at 0xa2000000 and is up to 428 MB (default 384 MB). The recovery's /proc/iomem shows System RAM from
+  0xa1c11000 on, persistent_ram only at 0xa1810000..0xa1a10000, and the stock DTB's fixed carve-outs end at 0x9f800000 (reserved-memory
+  of stock/dtbs/0.dtb = SDM670). With 192 MB the pool ran out (backboardd 70 MB, SpringBoard 32 MB, AegirPoster 34..70 MB): `OutOfMemory(Device)`.
+- With 384 MB: no refusals; backboardd 69 MB, SpringBoard 32 MB, AegirPoster (Astronomy) 70 MB held, AegirPoster stops crash-looping
+  after its first launches (check-in timeouts while its Metal device is created, a few seconds each); no GPU hang, no SMMU fault.
+- Not verifiable from here: what the display shows (the recovery screenshot is stale console text).
+
+### The multi-core boot stall, measured (5 boots of cpus=8: SpringBoard at +8 s, +351 s, +8 s, +263 s, +11 s)
+
+- Intermittent, about half of the boots; independent of the GPU (it predates it). During the stall the kernel is alive (the 15 s GPU idle tests
+  and the other kernel timers keep printing) but nothing moves in userland, and the eMMC stats thread itself reports "193333 ms" since its last run;
+  the stall lasts a fairly constant 190..270 s, then launchd goes on (first exec after it: prng_seedctl).
+- Already ruled out: TLBI, `dc civac` of the descriptor's line on the stuck CPU, whole-cache flush (set/way and FlushPoC_Dcache) on all CPUs, rewriting the
+  descriptor, Inner Shareable page-table walks (0158), the GPU page-table bug (0168), HS200 (off).
+- The constant length smells like a timeout, not a race that resolves by chance: look at what userland waits on for 3..4 minutes (a launchd/XPC
+  dependency, a keybag/AKS or other service the shim answers late, a lock held by the stuck vm_fault thread), e.g. with sweetsample=* output during the stall.
