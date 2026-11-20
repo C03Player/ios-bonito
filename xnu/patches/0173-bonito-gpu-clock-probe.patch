@@ -1,0 +1,40 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1461,6 +1461,28 @@
+ 	}
+ }
+ 
++/*
++ * Patch 0173: what is the GPU core clock? RBBM performance counter 0 on countable RBBM_ALWAYS_COUNT counts core clock cycles, the CP always-on
++ * counter runs at 19.2 MHz: the ratio over 10 ms is the core frequency. (Every real Turnip draw took about 25 ms and a full-screen pass 120-200 ms,
++ * which is what a core at the 19.2 MHz crystal frequency would do.)
++ */
++static void
++g6_clock_probe(unsigned n)
++{
++	uint32_t a0, a1, c0, c1;
++
++	g6_wr(G6_GMU(0x507), 0);                        /* A6XX_RBBM_PERFCTR_RBBM_SEL_0: RBBM_ALWAYS_COUNT */
++	g6_wr(G6_GMU(0x500), 1);                        /* A6XX_RBBM_PERFCTR_CNTL: counters on */
++	a0 = g6_rd(G6_GMU(0x980));
++	c0 = g6_rd(G6_GMU(0x41c));                      /* A6XX_RBBM_PERFCTR_RBBM_0_LO */
++	delay(10000);
++	a1 = g6_rd(G6_GMU(0x980));
++	c1 = g6_rd(G6_GMU(0x41c));
++	printf("SWEET GPU615: clock probe %u: always-on counter +%u (19.2 MHz), core counter +%u => core about %llu kHz; gfx3d rcg cfg %#x cmd %#x\n", n,
++	    a1 - a0, c1 - c0, (a1 - a0) ? (unsigned long long)(c1 - c0) * 19200ull / (a1 - a0) : 0ull, g6_rd(G6_CC_PA + 0x101cu + 4u),
++	    g6_rd(G6_CC_PA + 0x101cu));
++}
++
+ int
+ bonito_gpu_submit(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms)
+ {
+@@ -1776,6 +1798,7 @@
+ 		int rc;
+ 
+ 		(void)tsleep(&g6_chan, PZERO, "g6idle", hz * 15);
++		g6_clock_probe(n);
+ 		uint32_t tib[160], tn = 0;
+ 
+ 		if (n == 1 && (g6_testsel == 30 || g6_testsel == 31)) {
