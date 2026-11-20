@@ -263,3 +263,26 @@ Boot-args `cpus=8 sweetgpu=6 sweetmtl=2 sweetgpudelay=5 sweetgpureserve=32 sweet
   descriptor, Inner Shareable page-table walks (0158), the GPU page-table bug (0168), HS200 (off).
 - The constant length smells like a timeout, not a race that resolves by chance: look at what userland waits on for 3..4 minutes (a launchd/XPC
   dependency, a keybag/AKS or other service the shim answers late, a lock held by the stuck vm_fault thread), e.g. with sweetsample=* output during the stall.
+
+## WHY THE UI WAS SLOW: the GPU core ran on the 19.2 MHz crystal (2026-11-20, patches 0171-0174; logs/ft2.txt, ft4.txt, ft5.txt)
+
+Symptoms: a Home press animated at about 5 fps (1 fps with the GPU on), every command buffer of backboardd took 0.1-2 s from commit to completion
+(the bridge's per-buffer telemetry in /var/local/mtl2.log, `K` lines: 235 ms for one full-screen pass with 1-2 draws, 1.5-2 s for a transition).
+
+How it was found:
+- 0171 driver statistics (every 5 s): lock wait 0 us, GPU page mapping a few ms in 5 s, **submit run time 66-115 ms on average, up to 1.8 s**
+  (an idle test submit: 80 us): the GPU itself is slow, not the driver or the bridge.
+- 0172 slow submit snapshots: the command processor is not stalled, it marches through the IB at ~2.5 thousand dwords/s (one draw per ~25 ms) with
+  every block busy.
+- 0173 clock probe: RBBM_ALWAYS_COUNT (perf counter, counts at half the core clock) against the 19.2 MHz always-on counter: ~9.6 MHz of counter
+  = core on the **19.2 MHz crystal**; `GPU_CC_GX_GFX3D_CLK_SRC` (0x101c cmd, 0x1020 cfg) read cfg 0 = source 0 = bi_tcxo. The 180/267/355/430 MHz of
+  the DT are voltage levels (ARC), the clock itself is set by the GMU firmware from the DCVS table that the vendor driver sends over HFI, which
+  this driver does not use (it only boots the GMU through the OOB boot path).
+- 0174: switch the GFX3D RCG to GPLL0 (600 MHz, GCC `0x52000` bit 0 vote, `0x52004` bit 15 GPU branch; RCG source 5 + half-integer divider field
+  2*div-1, then UPDATE): boot-arg `sweetgpuclk` 200/300 (default)/400/600 MHz, `sweetgpulvl` = GX vote level (default 192 = SVS_L1;
+  64 for 180 MHz, 128 for 267, 192 for 355, 256 for 430). Probe: 150 MHz counter = **300 MHz core**.
+
+Result (unique command buffers of backboardd, commit to completion): median 723 -> 48 ms, 1-3 draws 243 -> 24 ms, 4-30 draws 422 -> 42 ms,
+over 30 draws (transitions) 1856 -> 125 ms; driver submit time avg 66-115 -> 5.9 ms, max 1.8 s -> 104 ms.
+The earlier theories (sysmem mode, Reduce Transparency, the DDR vote, 10 Hz panel copies) were not the cause (the 10 Hz cap of
+`sweetfb_hz` was real but secondary: 0171 made it 30 Hz).
