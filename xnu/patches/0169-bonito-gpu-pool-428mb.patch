@@ -1,0 +1,36 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1740,7 +1740,7 @@
+  * Adreno 615 version on top of the service layer above. Submits are synchronous (about 35 us for a small IB), so a fence is
+  * complete by the time it is handed out.
+  *
+- *   boot-args: sweetgpu=6 (service), sweetmtl=1|2 (publish IOAcceleratorES; 2 = the Turnip ABI), sweetgpupool=MB (default 192, at most 204)
++ *   boot-args: sweetgpu=6 (service), sweetmtl=1|2 (publish IOAcceleratorES; 2 = the Turnip ABI), sweetgpupool=MB (default 384, at most 428)
+  */
+ #define G6_WIN_BASE     0x1000000000ull         /* client windows: 4 GiB each from 64 GiB up, inside the 39-bit VA space */
+ #define G6_WIN_SIZE     0x100000000ull
+@@ -1761,8 +1761,9 @@
+  * low bank (0xbcc00000). An early boot stage already ran XNU out of 0xb0000000.., so the CPU may use it. 16 KiB units, no kernel mapping
+  * (SweetAccelerator maps and zeroes each buffer write-combined itself).
+  */
+-#define G6_UPOOL_BASE   0xb0000000ull
+-#define G6_UPOOL_MAX    0x0cc00000ull           /* up to 0xbcc00000 */
++#define G6_UPOOL_BASE   0xa2000000ull
++#define G6_UPOOL_MAX    0x1ac00000ull           /* up to 0xbcc00000; patch 0169: the live Linux map of the recovery (/proc/iomem) shows System RAM from
++                                                 * 0xa1c11000 on, only persistent_ram at 0xa1810000..0xa1a10000 and the stock DTB's fixed carve-outs end at 0x9f800000 */
+ 
+ static void
+ g6_upool_alloc(uint32_t mb)
+@@ -2042,9 +2043,9 @@
+ 		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
+ 	}
+ 	if (enabled >= 6) {
+-		uint32_t mtl = 0, mb = 192;
++		uint32_t mtl = 0, mb = 384;
+ 		PE_parse_boot_argn("sweetmtl", &mtl, sizeof(mtl));
+-		PE_parse_boot_argn("sweetgpupool", &mb, sizeof(mb));      /* MB, at most 204 */
++		PE_parse_boot_argn("sweetgpupool", &mb, sizeof(mb));      /* MB, at most 428 */
+ 		if (mtl) {
+ 			g6_upool_alloc(mb);     /* contiguous GPU memory for userland buffers: claimed now, it cannot be later */
+ 		}
