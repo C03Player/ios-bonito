@@ -1,0 +1,44 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -2186,6 +2186,21 @@
+ 	return g6_wait_fence_ms(fence, timeout_ms > 5000 ? 5000 : timeout_ms) == 0 ? 0 : 1;
+ }
+ 
++/*
++ * Patch 0182: the CPU copy of a frame to the panel (SweetFramebuffer.cpp, in the vsync tick) must not read a surface the GPU is still drawing. Until the asynchronous
++ * submits (0180) a submit returned only when the GPU was done, so a frame was complete whenever the swap arrived; now CoreAnimation swaps at "scheduled" and the copy
++ * caught half-rendered frames (tile-shaped blocks of the old frame, a doubled search field). Wait, at most 100 ms, for the GPU to finish what has been submitted
++ * so far (a newer frame's work is not waited for: the fence is read once).
++ */
++void
++sweet_gpu_wait_submitted(void)
++{
++	if (!g6_ready || !g6_async) {
++		return;
++	}
++	(void)g6_wait_fence_ms(__atomic_load_n(&g6_fence, __ATOMIC_RELAXED), 100);
++}
++
+ int
+ sweet_gpu_wait_fence_ns(uint32_t fence, uint64_t timeout_ns)
+ {
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -48,6 +48,7 @@
+ 	uint32_t fb_pitch, uint32_t corner_radius, uint32_t *out_dx, uint32_t *out_dy,
+ 	uint32_t *out_dw, uint32_t *out_dh);
+ void sweet_gpu_panel_stride(uint32_t stride);
++void sweet_gpu_wait_submitted(void);       /* bsd/dev/bonito_gpu.c, patch 0182: the GPU has finished what was submitted */
+ extern int sweet_display_fit_x, sweet_display_fit_y, sweet_display_fit_w, sweet_display_fit_h;
+ }
+ #define SWEET_FB_GPU_ROWBYTES           4352    /* the 2D engine writes 64-byte multiples */
+@@ -426,6 +427,7 @@
+ {
+ 	uintptr_t a = va & ~(uintptr_t)63, end = va + len;
+ 
++	sweet_gpu_wait_submitted();             /* patch 0182: not while the GPU is still drawing the frame */
+ 	for (; a < end; a += 64) {
+ 		__asm__ volatile ("dc civac, %0" :: "r" (a) : "memory");
+ 	}
