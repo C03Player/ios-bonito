@@ -112,3 +112,23 @@ cache flushes on the stuck CPU do nothing) only happens with several cores. Cand
 them for Apple's fabric; on the Kryo 360 (A55/A75, DynamIQ) only Inner Shareable memory is kept coherent between cores, so one core's PTE write stays in its cache while
 another core's table walker reads stale memory until the line is evicted (random delay). Patch 0158 makes SH_OUTER_MEMORY = 3 and TCR SH0/SH1 inner (what Linux uses).
 `CPUS=N` in mkios.sh selects the core count.
+
+### The stall depends on the number of CPUs (2026-11-20, 18 boots, kernel run 44665296319, logs/sw*.txt)
+
+Time from the kernel's first line ("Serial requested") to `exec SpringBoard`, sweetgpu=6 sweetmtl=2, same image each time (the CPUs are numbered
+silver first: 0-5 Kryo 360 Silver = A55, 6-7 Gold = A75):
+
+| cpus | SpringBoard at | stalls |
+|---|---|---|
+| 1 | clean (earlier runs; but only 1 core) | 0 |
+| 2 | +7, +8, +8 s | 0 of 3 |
+| 3 | +25, +23, +23 s | 0 of 3 |
+| 4 | +207, +9, +64 s | 2 of 3 |
+| 6 (silver only) | +175, +127 s, none within 330 s | 3 of 3 |
+| 8 | +8, +351, +8, +263, +11 s | 2 of 5 |
+
+So the stall is a multi-core race, not a Gold-core or cluster-crossing problem (it happens with silver cores only), and its chance grows with the core count.
+During a stall the kernel stays alive (timers, GPU idle tests) while one userland thread spins in the kernel on a level 3 translation fault for a page whose
+descriptor is valid; TLB maintenance, cache maintenance on the stuck CPU, Inner Shareable page-table walks and the GPU mapping fix change nothing.
+Until the race is found `bonito/tools/mkios.sh` defaults to `cpus=3` (set `CPUS=N` to override). Next candidates: a missing barrier or a lock in the
+asm-pmap path of patch 0006 (pmap_enter vs the fault retry on another CPU), or an erratum that needs an ACTLR/CPUACTLR workaround on the A55.
