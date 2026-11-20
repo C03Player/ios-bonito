@@ -132,3 +132,23 @@ During a stall the kernel stays alive (timers, GPU idle tests) while one userlan
 descriptor is valid; TLB maintenance, cache maintenance on the stuck CPU, Inner Shareable page-table walks and the GPU mapping fix change nothing.
 Until the race is found `bonito/tools/mkios.sh` defaults to `cpus=3` (set `CPUS=N` to override). Next candidates: a missing barrier or a lock in the
 asm-pmap path of patch 0006 (pmap_enter vs the fault retry on another CPU), or an erratum that needs an ACTLR/CPUACTLR workaround on the A55.
+
+### The livelock is per CPU and is cured by moving the thread (patch 0170, 2026-11-20, kernel run 44702526110, logs/lva..lvd.txt)
+
+Patch 0170 counts, per thread, consecutive user translation faults at the same pc and address; at 64 repeats (a real fault needs one retry) it binds the thread to
+another running CPU for one reschedule and logs `SWEET LIVELOCK`. Four cpus=8 boots: SpringBoard at +7 s every time (before: stalls of 4-6 minutes in
+2 of 5 boots, 3 of 3 with cpus=6), and 78, 82, 84 and 99 livelock events per boot. 75-90 of them were freed by the first move (repeat count stays 64);
+a few needed two to four moves. So:
+
+- the livelock is NOT rare: it hits dozens of times per boot, on every CPU (silver and gold), at a handful of stores (pc 0x1f7d3be0c, 0x201bbbcd8: dyld and libsystem
+  writing to `__DATA` at page offset +8 right after the page was mapped), in 60+ different threads. Before the mitigation each one lasted until something
+  moved the thread: milliseconds on a busy system and minutes on an idle one, which is also the "slow, glitchy" feel of every process start;
+- the stuck state is private to the CPU that took the fault (a different CPU sees the same mapping at once), which matches a per-core TLB or walk-cache fault
+  that `tlbi` on that core does not clear. The root cause is still open (candidates: an A55/A75 erratum around TLB/walk-cache handling of just-created
+  PTEs in a 16K-granule table, or a missing barrier between the PTE store and the fault return); the migration is a workaround, not a fix.
+- the default is back to `cpus=8` in bonito/tools/mkios.sh.
+
+Also (same day): `bonito/tools/disable-jobs.py` sets Disabled=true on launchd jobs that cannot run here (bluetoothd, WirelessRadioManager, fairplayd.H2, atc, lskdd,
+remotepairingdeviced, useractivityd): a 3 hour hands-on boot logged 8551 xpcproxy launches because launchd kept restarting them (lskdd every 1 s, others every 4-10 s);
+after disabling them the steady launch rate fell from 1.4/s to 0.5/s. nanotimekitcompaniond and the Spotlight/Siri speech extensions (crash with
+sig 6, 12 times each) are the next respawners.
