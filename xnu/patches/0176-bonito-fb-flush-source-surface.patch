@@ -1,0 +1,43 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -407,6 +407,23 @@
+ }
+ 
+ /*
++ * Patch 0176: the CPU present reads the frame backboardd's GPU rendered. The GPU writes DRAM and does not go through this CPU's caches, and backboardd
++ * recycles a few surfaces: lines of an earlier read of the same surface stay in the CPU cache, so a copy mixed old and new lines (64 bytes each) wherever two
++ * frames differ (the status bar while it fades) and, as nothing redraws afterwards, the torn frame stayed on the panel (dashed, sheared streaks where the clock
++ * and battery belong). Clean and invalidate the source range before reading it (dirty lines go to memory first, nothing is lost).
++ */
++static inline void
++sweet_fb_flush_src(uintptr_t va, size_t len)
++{
++	uintptr_t a = va & ~(uintptr_t)63, end = va + len;
++
++	for (; a < end; a += 64) {
++		__asm__ volatile ("dc civac, %0" :: "r" (a) : "memory");
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++/*
+  * One row of the CPU copy, n pixels to panel (x, y): rows in the corner bands
+  * are darkened on the way (the GPU path has its own mattes), so the panel
+  * never shows the corners unmasked.
+@@ -599,6 +616,7 @@
+ 			continue;
+ 		}
+ 		uintptr_t src = s->kernelAddress();
++		sweet_fb_flush_src(src, (size_t)s->offset + (size_t)s->bytesPerRow * s->height);
+ 		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
+ 		if (w <= 0 || h <= 0) {
+ 			w = (int32_t)s->width;
+@@ -739,6 +757,7 @@
+ 			continue;
+ 		}
+ 		uintptr_t src = s->kernelAddress();
++		sweet_fb_flush_src(src, (size_t)s->offset + (size_t)s->bytesPerRow * s->height);
+ 		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
+ 		if (w <= 0 || h <= 0) {
+ 			w = (int32_t)s->width;
