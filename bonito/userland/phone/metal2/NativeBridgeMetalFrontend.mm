@@ -1395,6 +1395,9 @@ static char sweetMemoryOwnerKey;
  if(!row || row*d.height>length){NBLOG(@"native-metal: newTextureWithBytesNoCopy: %lux%lu fmt %lu does not fit %lu bytes",(unsigned long)d.width,(unsigned long)d.height,(unsigned long)d.pixelFormat,(unsigned long)length);return nil;}
  id<MTLBuffer> buffer=[(id<MTLDevice>)self newBufferWithBytesNoCopy:bytes length:(length+page-1)&~(page-1) options:MTLResourceStorageModeShared deallocator:deallocator];
  if(!buffer)return nil;
+ // ios-on-pixel: the buffer is page-rounded for the bridge, but the caller only promises `length` bytes: the CPU cache maintenance must not run past them
+ // (a flush of the rounded range faulted at the first byte after the caller's mapping and killed backboardd, SIGSEGV in dc civac).
+ ((NBBuffer *)buffer).wrappedLength=length;
  return (id<MTLTexture>)textureOnBuffer((NBBuffer *)buffer,d,0,row,false);
 }
 - (id)newTextureLayoutWithDescriptor:(MTLTextureDescriptor *)d isHeapOrBufferBacked:(BOOL)backed {
