@@ -326,3 +326,28 @@ clean (the bridge has its own `_sys_dcache_flush`) or a copy taken before the CP
 Not verified: which texture is the garbled one. Try: (1) in the bridge, flush the CPU cache of a no-copy buffer's range right before its shadow copy is recorded;
 (2) log the pitch used by the copy; (3) look at `W` records against the time of garbled frames; (4) as a test only, make the client's pitch 64-aligned (a UIKit/CA backing
 store setting) to see whether the warning and the glitch go away together.
+
+## ROOT CAUSE OF THE SMEARED / "TV STATIC" SCREEN (2026-11-20, patch 0178; user photo logs/newss.jpg, captures sw1/sm1/tu1 vs fx1-fx4)
+
+Symptom (the user's photo): whenever something happens on the screen the whole home screen turns into slanted white and coloured bands (icons, the widget, the dock icons
+stretched across the full width), while uniform areas (wallpaper) look fine. Captured with the swipe stimulus (patch 0177 `sweetswipe=SECS`, `sweetshot=1`): logs/sw1.png,
+sm1.png (Turnip sysmem), tu1.png (noubwc): the same bands, so neither UBWC nor tiled (GMEM) rendering is involved.
+
+Proof that it is a pure row pitch error: flatten the panel snapshot into one pixel stream and cut it again at 1088 pixels (4352 bytes) instead of 1080 (4320): the vertical
+coherence drops from 8.3 to 2.8 and the home screen comes out clean (icons, labels, widget, dock; the script is in this session's history: flatten, try pitches 1056..1152, pick the minimum).
+The slope of the bands (about 8 pixels per row) is exactly 4352 - 4320 = 32 bytes.
+
+Cause: `AppleCLCD::start` (SweetFramebuffer.cpp) made the panel's default surface with the GPU's 4352-byte rows whenever `sweetgpu` is set (a comment from the Pixel 4, where the
+GPU present path later switches the display itself to 4352-byte rows). On bonito that switch never happens (`sweet_gpu_fb_ready()` is false), so the display kept scanning the
+panel memory (the ABL splash buffer at 0x9c000000) at 4320 bytes per row while the surface said 4352, and that surface was handed to clients as THE default surface. The render server
+alternates between it and its own surface: a frame rendered into the default surface went straight into scanout memory with the wrong stride (the copy code skips a swap of the panel's own
+surface: "already in place"), a frame in the other surface was copied correctly, so the panel flipped between a sheared and a good frame whenever the screen changed (TV static in a photo)
+and at rest showed whichever came last (about half of the idle captures had a garbled status bar). The earlier findings in this file about the status bar (cache, unaligned pitch)
+were real but smaller effects of the same mismatch family.
+
+Fix (0178): the panel surface keeps the display's stride (4320, WC mapping, console and CPU copy target); with the GPU on, clients get a separate RAM surface with
+4352-byte rows (`sweet_surface_create_ram`) as the default surface, and every present copies it to the panel like any other surface (3-5 ms at 30 Hz).
+Result: four swipe-loop boots (logs/fx1-fx4.png) all coherent at the panel's pitch (score 2.8-3.8, the idle reference is 2.86; the sheared ones scored 8.3-8.6); fx3.png shows the App Library
+page sliding in with crisp icons and a blurred dock behind it.
+Related earlier fixes that stay: 0176 (clean the CPU cache of the source surface before the CPU copy), bridge 0102 (report 64-byte linear alignment), the no-copy buffer flush in the Metal frontend.
+Test tools: patch 0177 `sweetswipe=SECS` (swipes the touch screen: Spotlight pull-down, home gesture, page swipes), `sweetshot=1` + `SHOT=1 ci-cycle.sh`.
