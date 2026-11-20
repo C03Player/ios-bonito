@@ -1,0 +1,13 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1910,7 +1910,8 @@
+ int
+ sweet_gpu_map_at(uint64_t iova, const uint64_t *pages, uint32_t npages)
+ {
+-	return bonito_gpu_map_pages(iova, pages, npages, PAGE_SIZE);
++	/* SweetAccelerator hands over 4K pages (one physical address per 4K, whatever the 16K VM page): map them one by one, not as 16K runs (patch 0168) */
++	return bonito_gpu_map_pages(iova, pages, npages, 0x1000);
+ }
+ 
+ void
