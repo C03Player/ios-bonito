@@ -31,6 +31,7 @@ JOBS = {
         'RunAtLoad': True,
         'KeepAlive': {'SuccessfulExit': False},
         'ThrottleInterval': 30,
+        'JetsamProperties': {'JetsamMemoryLimit': 1400},     # the QuartzCore step was killed for its per-process memory limit (jetsam reason 7)
         'StandardOutPath': '/private/var/local/m2vtest.log',
         'StandardErrorPath': '/private/var/local/m2vtest.log',
     },

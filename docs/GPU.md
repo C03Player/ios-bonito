@@ -218,3 +218,17 @@ fill+copy 1 MB 0 wrong words, a compute shader compiled on the phone 0 wrong of 
   at the same time, not from the Turnip command streams themselves; to be re-checked now that the mappings are right.
 - So the earlier "GPU wedges on the first real Turnip IB" theory (hang dumps, blit tests 30/31) was chasing a symptom of the same
   wrong mapping: the IB itself was fetched from a mapping that pointed at the wrong pages. The blit tests are still valid as hardware checks (2D blit works from high and low RAM).
+
+## UI boot with the GPU on, 8 CPUs (2026-11-20 01:44, kernel run 44647376840, log logs/ui168c.txt)
+
+Boot-args `cpus=8 sweetgpu=6 sweetmtl=2 sweetgpudelay=5 sweetreboot=600`, only WirelessRadioManagerd, bluetoothd and fairplayd denied:
+
+- SpringBoard exec at 86 s (233 s with cpus=1), backboardd, chronod, PosterBoard and the poster extensions follow; no stall, no panic, the
+  full timed window ran; no GPU hang and no SMMU fault in the kernel log.
+- backboardd holds 35 then 70 MB of the GPU pool and SpringBoard 32 MB, i.e. the compositor and SpringBoard really render through
+  Metal -> metal2vulkan -> Turnip -> the Adreno 615.
+- Open: AegirPoster (the Astronomy wallpaper) gets "extension check-in timeout" (ns 7 code 3) and is relaunched; with cpus=1 every poster
+  extension timed out (too slow), so single-core runs are only for diagnostics. The earlier multi-core boot stall did not show here:
+  the wrong 16K-run GPU page-table entries let the GPU write into arbitrary physical pages (BoImport buffers are managed RAM), which can
+  corrupt kernel or user memory. To be confirmed over several boots before calling the stall fixed.
+- The screenshot pulled from the recovery (SHOT=1) shows stale console text from an earlier boot, not the live UI; the display can only be judged by eye.
