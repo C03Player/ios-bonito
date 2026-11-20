@@ -1,0 +1,245 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1061,6 +1061,7 @@
+ int bonito_gpu_map_pages(uint64_t iova, const uint64_t *pages, uint32_t npages, uint32_t page_size);
+ void bonito_gpu_unmap(uint64_t iova, uint64_t size);
+ int bonito_gpu_submit_n(const uint64_t *ib_iova, const uint32_t *ib_dwords, unsigned n, uint32_t timeout_ms);
++static bool g6_ring_space(uint32_t need, unsigned timeout_ms);
+ int bonito_gpu_submit(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms);
+ 
+ bool
+@@ -1566,6 +1567,10 @@
+ 	dw[cnt++] = (uint32_t)fva;
+ 	dw[cnt++] = (uint32_t)(fva >> 32);
+ 	dw[cnt++] = fence;
++	if (!g6_ring_space(cnt, 2000)) {
++		lck_mtx_unlock(&g6_lock);
++		return -1;
++	}
+ 	rc = g6_ring(dw, cnt, NULL, timeout_ms);
+ 	g6_pread(G6_OFF_SCRATCH + 0x10, &got, 4);
+ 	/*
+@@ -1587,6 +1592,124 @@
+ bonito_gpu_submit(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms)
+ {
+ 	return bonito_gpu_submit_n(&ib_iova, &dwords, 1, timeout_ms);
++}
++
++/*
++ * Patch 0180: asynchronous submits. The client ABI always had separate Submit and WaitFence methods, but every submit used to be waited for before it returned
++ * (the thread spun in the kernel for the whole GPU time, about 56 ms of a 110 ms frame, and only then encoded the next frame). Now a v2 submit queues the packets
++ * and returns its fence; the GPU writes the fence to the scratch word when the batch is done (CACHE_FLUSH_TS), WaitFence waits for that, and everything that
++ * would pull memory or mappings out from under the GPU (unmap, pool free, window free) first waits for the GPU to be idle. Boot-arg sweetgpuasync=0 turns it off.
++ */
++static int g6_async = 1;
++
++static uint32_t
++g6_fence_done(void)
++{
++	uint32_t got = 0;
++
++	g6_pread(G6_OFF_SCRATCH + 0x10, &got, 4);
++	return got;
++}
++
++/* 0: the GPU has written `fence` (or a later one); -1: not within timeout_ms (the hang is dumped once) */
++static int
++g6_wait_fence_ms(uint32_t fence, uint32_t timeout_ms)
++{
++	uint64_t t0 = mach_absolute_time(), ns;
++	unsigned spins = 0;
++
++	for (;;) {
++		if ((int32_t)(g6_fence_done() - fence) >= 0) {
++			return 0;
++		}
++		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++		if (ns > (uint64_t)timeout_ms * 1000000ull) {
++			break;
++		}
++		if ((++spins & 63) == 0) {
++			lck_mtx_lock(&g6_lock);
++			(void)g6_clear_fault();         /* a translation fault stalls the GPU until the context bank's FSR is cleared; the fence then lands */
++			lck_mtx_unlock(&g6_lock);
++		}
++		delay(50);
++	}
++	lck_mtx_lock(&g6_lock);
++	g6_hang_dump();
++	lck_mtx_unlock(&g6_lock);
++	return -1;
++}
++
++static void
++g6_wait_idle(void)
++{
++	if (g6_ready && g6_async) {
++		(void)g6_wait_fence_ms(__atomic_load_n(&g6_fence, __ATOMIC_RELAXED), 2000);
++	}
++}
++
++/* room for `need` dwords in the ring (the GPU may still be reading older packets); g6_lock held */
++static bool
++g6_ring_space(uint32_t need, unsigned timeout_ms)
++{
++	for (unsigned i = 0; i < timeout_ms * 20; i++) {
++		uint32_t rptr = g6_rd(G6_GMU(G6_CP_RB_RPTR));
++		uint32_t used = (g6_wptr + G6_RING_DW - rptr) % G6_RING_DW;
++
++		if (used + need + 8 < G6_RING_DW) {
++			return true;
++		}
++		delay(50);
++	}
++	return false;
++}
++
++/* queue up to 16 IBs behind one fence and return at once; the fence is complete when g6_fence_done() reaches it */
++static int
++bonito_gpu_submit_async(const uint64_t *ib_iova, const uint32_t *ib_dwords, unsigned n, uint32_t *fence_out)
++{
++	uint64_t fva = G6_GVA_POOL + G6_OFF_SCRATCH + 0x10;
++	uint32_t dw[16 * 8 + 5], fence, w, first;
++	unsigned cnt = 0;
++
++	if (!g6_ready || n == 0 || n > 16) {
++		return -1;
++	}
++	lck_mtx_lock(&g6_lock);
++	fence = g6_fence + 1;
++	for (unsigned i = 0; i < n; i++) {
++		dw[cnt++] = g6_pkt7(0x46, 1);
++		dw[cnt++] = 0x18;                               /* PC_CCU_INVALIDATE_DEPTH */
++		dw[cnt++] = g6_pkt7(0x46, 1);
++		dw[cnt++] = 0x19;                               /* PC_CCU_INVALIDATE_COLOR */
++		dw[cnt++] = g6_pkt7(0x3f, 3);
++		dw[cnt++] = (uint32_t)ib_iova[i];
++		dw[cnt++] = (uint32_t)(ib_iova[i] >> 32);
++		dw[cnt++] = ib_dwords[i];
++	}
++	dw[cnt++] = g6_pkt7(0x46, 4);
++	dw[cnt++] = 0x04;                                       /* CACHE_FLUSH_TS */
++	dw[cnt++] = (uint32_t)fva;
++	dw[cnt++] = (uint32_t)(fva >> 32);
++	dw[cnt++] = fence;
++	if (!g6_ring_space(cnt, 2000)) {
++		lck_mtx_unlock(&g6_lock);
++		return -1;
++	}
++	g6_fence = fence;
++	g6_submit_count++;
++	g6_last_ib_va = ib_iova[n - 1];
++	g6_last_ib_dw = ib_dwords[n - 1];
++	w = g6_wptr;
++	first = cnt < G6_RING_DW - w ? cnt : G6_RING_DW - w;
++	g6_pwrite(G6_OFF_RING + 4ull * w, dw, 4ull * first);
++	if (first < cnt) {
++		g6_pwrite(G6_OFF_RING, dw + first, 4ull * (cnt - first));
++	}
++	g6_wptr = (w + cnt) % G6_RING_DW;
++	g6_wr(G6_GMU(G6_CP_RB_WPTR), g6_wptr);
++	lck_mtx_unlock(&g6_lock);
++	*fence_out = fence;
++	return 0;
+ }
+ 
+ /* Boot-time self test of the service: page-list mapping with 16 KiB pages, many submits with timing, unmap and recovery. */
+@@ -2005,6 +2128,7 @@
+ void
+ sweet_gpu_unmap_user(uint64_t iova, uint64_t len)
+ {
++	g6_wait_idle();                 /* patch 0180: the GPU may still be reading what is being unmapped */
+ 	bonito_gpu_unmap(iova, len);
+ }
+ 
+@@ -2027,15 +2151,26 @@
+ }
+ 
+ int
+-sweet_gpu_wait_fence(uint32_t fence, __unused uint32_t timeout_ms)
+-{
+-	return (int32_t)(__atomic_load_n(&g6_fence, __ATOMIC_RELAXED) - fence) >= 0 ? 0 : 1;
++sweet_gpu_wait_fence(uint32_t fence, uint32_t timeout_ms)
++{
++	if (!g6_ready) {
++		return 0;               /* nothing was ever submitted */
++	}
++	if ((int32_t)(g6_fence_done() - fence) >= 0) {
++		return 0;
++	}
++	if (timeout_ms == 0 || !g6_async) {
++		return 1;
++	}
++	return g6_wait_fence_ms(fence, timeout_ms > 5000 ? 5000 : timeout_ms) == 0 ? 0 : 1;
+ }
+ 
+ int
+-sweet_gpu_wait_fence_ns(uint32_t fence, __unused uint64_t timeout_ns)
+-{
+-	return sweet_gpu_wait_fence(fence, 0);
++sweet_gpu_wait_fence_ns(uint32_t fence, uint64_t timeout_ns)
++{
++	uint64_t ms = timeout_ns / 1000000ull;
++
++	return sweet_gpu_wait_fence(fence, ms > 5000 ? 5000 : (uint32_t)(ms ? ms : (timeout_ns ? 1 : 0)));
+ }
+ 
+ int
+@@ -2060,6 +2195,7 @@
+ sweet_gpu_window_free(uint64_t base)
+ {
+ 	if (base >= G6_WIN_BASE && base < G6_WIN_BASE + G6_WIN_SIZE * G6_WINDOWS) {
++		g6_wait_idle();
+ 		lck_mtx_lock(&g6_lock);
+ 		g6_win_used &= ~(1u << ((base - G6_WIN_BASE) / G6_WIN_SIZE));
+ 		lck_mtx_unlock(&g6_lock);
+@@ -2076,6 +2212,7 @@
+ void
+ sweet_gpu_unmap_at(uint64_t iova, uint64_t len)
+ {
++	g6_wait_idle();
+ 	bonito_gpu_unmap(iova, len);
+ }
+ 
+@@ -2086,14 +2223,22 @@
+ 	if (busy) {
+ 		*busy = false;
+ 	}
++	uint32_t last = 0;
+ 	for (unsigned i = 0; i < n; i += 16) {
+ 		unsigned k = n - i < 16 ? n - i : 16;
++		if (g6_async) {
++			if (bonito_gpu_submit_async(iova + i, dwords + i, k, &last)) {
++				return 0;
++			}
++			continue;
++		}
+ 		int rc = bonito_gpu_submit_n(iova + i, dwords + i, k, 2000);
+ 		if (rc != 0 && rc != -2) {
+ 			return 0;
+ 		}
+-	}
+-	return __atomic_load_n(&g6_fence, __ATOMIC_RELAXED);
++		last = __atomic_load_n(&g6_fence, __ATOMIC_RELAXED);
++	}
++	return last;
+ }
+ 
+ bool
+@@ -2157,6 +2302,7 @@
+ {
+ 	uint32_t i;
+ 	bytes = (bytes + PAGE_MASK) & ~(uint64_t)PAGE_MASK;
++	g6_wait_idle();
+ 	lck_mtx_lock(&g6_lock);
+ 	for (i = 0; i < g6_ext_n && g6_ext[i].pa < pa; i++) {
+ 	}
+@@ -2250,6 +2396,7 @@
+ 	PE_parse_boot_argn("sweetgpuevent", &g6_testevent, sizeof(g6_testevent));
+ 	PE_parse_boot_argn("sweetgpuregs", &g6_testregs, sizeof(g6_testregs));
+ 	PE_parse_boot_argn("sweetgpupk", &g6_testpk, sizeof(g6_testpk));
++	PE_parse_boot_argn("sweetgpuasync", &g6_async, sizeof(g6_async));
+ 	if (enabled >= 4) {
+ 		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
+ 	}
