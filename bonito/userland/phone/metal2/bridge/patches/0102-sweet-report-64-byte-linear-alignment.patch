@@ -1,0 +1,53 @@
+diff --git a/crates/metal2vulkan-runtime/src/linear_plan.rs b/crates/metal2vulkan-runtime/src/linear_plan.rs
+index eeaf5f6..fd82370 100644
+--- a/crates/metal2vulkan-runtime/src/linear_plan.rs
++++ b/crates/metal2vulkan-runtime/src/linear_plan.rs
+@@ -146,6 +146,17 @@ use metal2vulkan::vk::{
+ /// (`minimumTextureBufferAlignmentForPixelFormat:`).
+ pub(super) const LINEAR_ALIGNMENT: u64 = 16;
+ 
++/// ios-on-pixel: the alignment this device TELLS its clients to use for a texture's offset and rows in a
++/// buffer or IOSurface (the answers to `minimumLinearTextureAlignmentForPixelFormat:` and to the
++/// private linear/IOSurface alignment properties). Apple's GPUs answer 16; Turnip's linear images take
++/// rows of a multiple of 64 bytes (the A6xx texture pitch field), so a client that rounded its rows
++/// to 16 (CoreAnimation's CPU-drawn layers: 194 px of BGRA8 = 776 bytes, rows 784 apart) got a
++/// layout the driver refuses (`VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT`) and the
++/// shadow-copy fallback read it with the driver's own pitch (832): the text came out sheared. The
++/// checks still accept every multiple of [`LINEAR_ALIGNMENT`], so a client that ignores the answer
++/// still gets its texture.
++pub(super) const REPORTED_LINEAR_ALIGNMENT: u64 = 64;
++
+ /// The alignment of a 2D array's offset in its buffer, and the multiple each of its slices is
+ /// rounded up to.
+ pub(super) const ARRAY_ALIGNMENT: u64 = 128;
+@@ -247,7 +258,7 @@ pub(super) fn linear_alignment(
+     if !level.describes(pf) {
+         return Err(BufferTextureProblem::NotLinear { pixel_format: pf });
+     }
+-    backed(pf).map(|()| LINEAR_ALIGNMENT)
++    backed(pf).map(|()| REPORTED_LINEAR_ALIGNMENT)
+ }
+ 
+ /// The Metal call that makes a texture over a buffer.
+diff --git a/crates/metal2vulkan-runtime/src/private_properties.rs b/crates/metal2vulkan-runtime/src/private_properties.rs
+index 291a247..dfdf813 100644
+--- a/crates/metal2vulkan-runtime/src/private_properties.rs
++++ b/crates/metal2vulkan-runtime/src/private_properties.rs
+@@ -35,7 +35,7 @@ use crate::families::{
+     FamilyRow, FeatureRow, FormatCapabilities, FormatCapability, GpuFamily, LimitRow, Refusal,
+     RowAudit, RowState,
+ };
+-use crate::linear_plan::LINEAR_ALIGNMENT;
++use crate::linear_plan::REPORTED_LINEAR_ALIGNMENT;
+ use crate::metal_level::MetalLevel;
+ use crate::render_state::MAX_VIEWPORTS;
+ use crate::texture_descriptor::{largest_side, MAX_ARRAY_LENGTH};
+@@ -619,7 +619,7 @@ impl Answers<'_> {
+             C::DeviceLinearTextureAlignmentBytes
+             | C::LinearTextureAlignmentBytes
+             | C::IosurfaceTextureAlignmentBytes
+-            | C::IosurfaceReadOnlyTextureAlignmentBytes => LINEAR_ALIGNMENT,
++            | C::IosurfaceReadOnlyTextureAlignmentBytes => REPORTED_LINEAR_ALIGNMENT,
+             C::MaxVertexBuffers
+             | C::MaxFragmentBuffers
+             | C::MaxComputeBuffers
