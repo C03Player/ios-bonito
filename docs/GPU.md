@@ -313,3 +313,16 @@ elements: the signature of a texture read with a wrong row pitch, or of stale CP
 an IOSurface that the GPU then samples through a non-coherent mapping; the kernel leaves cache maintenance of imported pages to the client: patch 0115 note).
 Next steps: capture more transition frames (sweetshot=1 with sweetreboot aligned to a press), compare the IOSurface bytesPerRow of the status bar layer with the pitch the
 bridge gives Turnip, and check where the bridge flushes the CPU cache before a submit (its own `_sys_dcache_flush`).
+
+### Lead on the status bar glitch: textures over no-copy buffers with an unaligned row pitch (2026-11-20, mtl2.log of the vis boots)
+
+The bridge's own warnings (/var/local/mtl2.log, `W` records, one run of backboardd): 16 x `VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT` and 3 x
+"a 2D BGRA8Unorm texture of 194x237 over a buffer at offset 0 with rows of 784 bytes: the buffer is a no-copy buffer, and the device makes no linear ...".
+The bridge makes a Metal texture over a buffer by creating a Vulkan image with `DRM_FORMAT_MOD_LINEAR` and an explicit plane layout over the buffer's memory; Turnip
+refuses a row pitch that is not what it computes itself (194 px x 4 B = 776, padded to 784 by the client, the driver wants a multiple of 64: 832), so the bridge uses
+its "shadowed texture" path (a separate image kept in step with the buffer by copies, `metal2vulkan-degrade-shadowed-texture` / `staged-texture-buffer` in the binary).
+That path depends on WHEN the copy reads the CPU-written bytes: the CPU writes the buffer through its cache and the GPU copy reads DRAM, so a missing cache
+clean (the bridge has its own `_sys_dcache_flush`) or a copy taken before the CPU finished would show as half-old rows, and a wrong pitch in the copy as sheared rows.
+Not verified: which texture is the garbled one. Try: (1) in the bridge, flush the CPU cache of a no-copy buffer's range right before its shadow copy is recorded;
+(2) log the pitch used by the copy; (3) look at `W` records against the time of garbled frames; (4) as a test only, make the client's pitch 64-aligned (a UIKit/CA backing
+store setting) to see whether the warning and the glitch go away together.
