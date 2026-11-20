@@ -351,3 +351,16 @@ Result: four swipe-loop boots (logs/fx1-fx4.png) all coherent at the panel's pit
 page sliding in with crisp icons and a blurred dock behind it.
 Related earlier fixes that stay: 0176 (clean the CPU cache of the source surface before the CPU copy), bridge 0102 (report 64-byte linear alignment), the no-copy buffer flush in the Metal frontend.
 Test tools: patch 0177 `sweetswipe=SECS` (swipes the touch screen: Spotlight pull-down, home gesture, page swipes), `sweetshot=1` + `SHOT=1 ci-cycle.sh`.
+
+### 15 minute stability run on the 0178 kernel (2026-11-20 18:00-18:15, kernel run 44767945185, logs/long1.txt, long1.png)
+
+`cpus=8 sweetgpu=6 sweetmtl=2 sweetgpudelay=5 sweetshot=5 sweethidtest=60 sweetswipe=75 sweetreboot=900`: ran to the timed reset; no crash of backboardd or SpringBoard, no GPU hang,
+no SMMU fault, no panic; 136+ gesture rounds; presents stay at a median of 27 per 5 s (max 41) from start to end (no drift); the final frame is coherent at the panel's pitch
+(score 1.75) and shows the widgets page: the Batteries widget renders ("100%" with its ring), the other widgets (and the Smart Stack card behind the first) are plain white boxes.
+The page-fault livelock workaround (0170) fires about 100 times in the run, as designed.
+
+Where the time goes now during animation (bridge telemetry of backboardd, cumulative): commit-to-complete mean 109 ms per command buffer; the GPU is 30-53 % busy
+(about 130 submits per second of 3.5 ms) and only 1.2 % of backboardd's thread samples are running (4 of 328): it waits, it is not CPU bound. Cost items: the no-copy
+cache flush of the Metal frontend (new, ~18 GB flushed per 200 s, ~7 ms CPU per command buffer: could be limited to what the command buffer really reads/writes), pipeline
+first use (103 pipelines, 62 ms each on average, up to 1 s: hitches in the first minute of an effect; pre-warming from m2v-cache/pipelines.log would hide them), and serial
+submits (the driver waits for the GPU after every IB; a call with up to 16 IBs could queue them all and wait once).
