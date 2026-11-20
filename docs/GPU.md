@@ -364,3 +364,14 @@ Where the time goes now during animation (bridge telemetry of backboardd, cumula
 cache flush of the Metal frontend (new, ~18 GB flushed per 200 s, ~7 ms CPU per command buffer: could be limited to what the command buffer really reads/writes), pipeline
 first use (103 pipelines, 62 ms each on average, up to 1 s: hitches in the first minute of an effect; pre-warming from m2v-cache/pipelines.log would hide them), and serial
 submits (the driver waits for the GPU after every IB; a call with up to 16 IBs could queue them all and wait once).
+
+### Batch submit (0179) and a crash found by validating it (2026-11-20 evening)
+
+- 0179 queues up to 16 IBs of one submit in the ring with one fence: submits per second fall from ~130 to ~11, but the GPU stays ~46-50 % busy and presents stay at a median of 17-29 per 5 s: no gain,
+  so the idle half is not between IBs (it is CPU side before the submit, or waits in the compositor). Kept: harmless, fewer round trips.
+- The validation boots showed a backboardd crash (SIGSEGV, 2 of 6 boots, then 5 crashes in 3 of 6 boots with a first fix): `dc civac` in the plugin's `sys_dcache_flush` faults at the first byte after
+  a mapped region (far = end of a mapping, page aligned). The Metal frontend's new no-copy flush (flushNoCopy) rounded a texture-over-client-memory range up to a page (fixed: it now uses the caller's length) and the
+  bridge/frontend round other lengths to rows and padded pitches, so the final fix is in the flush itself: it clamps every range to mapped, readable memory with vm_region_64 (about 3 us per call).
+- Userland CI: the Turnip build broke on the 2026-11-18 runner image (ir3_lexer.c.o: UTIL_ARCH_LITTLE_ENDIAN unset, PIPE_FORMAT_* undeclared; Xcode 16.4, rustc 1.98, brew tools float). Workaround:
+  bonito/userland/turnip-prebuilt-run names an earlier run whose Turnip library the workflow reuses (the library is byte-identical to the one that was verified on the phone).
+- Disk: the container fills up (test images, CI downloads); tests then die silently. `df -h /` before long sweeps; regenerable: bonito/shim/out/*.img, work/*.payload, work/ci-*, scratchpad downloads.
