@@ -388,3 +388,10 @@ or backboardd crash, all final frames coherent.
 The first version (0180) panicked in the first boot (`kmem_alloc ... failed with 3`, five cores at the same pc, false hang dumps): its waiters spun in delay() for the whole wait, several threads kept most cores busy, and poll-style WaitFence calls with tiny timeouts
 were reported as hangs. 0181 fixes exactly that (sleeping waits, hang dump only after a wait of a second or more, back-pressure). Lesson: validate every kernel scheduling change with several boots before a hands-on boot.
 Remaining per-frame costs (all on the render thread): about 50 ms of encoding (user time), the no-copy cache flush (about 7 ms per command buffer), the first use of each pipeline (60 ms on average, up to 1 s).
+
+### GPU clock 600 MHz (2026-11-21, logs/ck1-3, kernel 0181)
+
+`sweetgpuclk=600 sweetgpulvl=384` (GPLL0 / 1, vote 384): the clock probe measures 300 MHz on RBBM_ALWAYS_COUNT, which counts at half the core clock, so the core runs at 600 MHz (the 400 MHz default reads 200). 3 of 3 boots without panic, hang dump or crash.
+Presents per 5 s in the gesture loop: median 42.5, mean 44.0, against median 42.0, mean 42.9 at 400 MHz: no gain. A 50 % faster GPU does not make the animation faster, so the GPU is no longer the limit with asynchronous submits;
+the default stays 400 MHz / vote 256 (less power, lower vote). Telemetry of the same run (logs, mtl2.log of boot prof4): a typical frame is 11 render passes, 101 draws and 7.2 Mpixels shaded (3.1 screens of blur and compositing), command buffer commit to complete
+130-170 ms, no-copy cache flush 9 ms and surface cache flush 3 ms per command buffer (54 flushes, 54 MB per frame), 107 pipelines built in 5.6 s over the whole boot. What is left is the render thread's own CPU time (about 50 ms of encoding per frame).
