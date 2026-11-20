@@ -1,0 +1,80 @@
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 24f1abc..55e609a 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -43,6 +43,8 @@
+ #include <kern/restartable.h>
+ #include <kern/socd_client.h>
+ #include <kern/thread.h>
++#include <kern/processor.h>
++#include <kern/sched_prim.h>
+ #include <kern/zalloc_internal.h>
+ #include <mach/exception.h>
+ #include <mach/arm/traps.h>
+@@ -1353,6 +1355,55 @@ handle_sw_step_debug(arm_saved_state_t *state)
+ 	__builtin_unreachable();
+ }
+ 
++/*
++ * bonito (patch 0170): the page fault livelock of the multi-core boot stall. A user write takes a level 3 translation fault at an address the pmap
++ * has mapped (valid descriptor, correct table base), vm_fault finds nothing to do and returns, and the CPU faults again, for minutes, until
++ * something else moves the thread (docs/PERF.md: needs 4 or more CPUs; TLB and cache maintenance on the stuck CPU do not help). One real fault
++ * needs one retry at most: the same thread faulting 64 times at the same pc and address is the livelock, so it is moved to another running CPU
++ * (bound there for one reschedule, then released) and the event is logged, which also tells a later boot whether the move frees it.
++ */
++#define SWEET_LL_SLOTS 16
++#define SWEET_LL_REPEATS 64
++static struct {
++	thread_t th;
++	uint64_t pc, far;
++	uint32_t n;
++} sweet_ll[SWEET_LL_SLOTS];
++
++static void
++sweet_livelock_check(arm_saved_state_t *state, vm_offset_t far)
++{
++	thread_t th = current_thread();
++	unsigned slot = (unsigned)(((uintptr_t)th >> 8) % SWEET_LL_SLOTS);
++	uint64_t pc = get_saved_state_pc(state);
++
++	if (sweet_ll[slot].th != th || sweet_ll[slot].pc != pc || sweet_ll[slot].far != (uint64_t)far) {
++		sweet_ll[slot].th = th;
++		sweet_ll[slot].pc = pc;
++		sweet_ll[slot].far = (uint64_t)far;
++		sweet_ll[slot].n = 1;
++		return;
++	}
++	if (++sweet_ll[slot].n % SWEET_LL_REPEATS != 0) {
++		return;
++	}
++
++	processor_t cur = current_processor(), target = PROCESSOR_NULL;
++	for (unsigned i = 0; i < processor_count && target == PROCESSOR_NULL; i++) {
++		processor_t p = cpu_to_processor((int)i);
++		if (p != PROCESSOR_NULL && p != cur && (p->state == PROCESSOR_RUNNING || p->state == PROCESSOR_IDLE || p->state == PROCESSOR_DISPATCHING)) {
++			target = p;
++		}
++	}
++	printf("SWEET LIVELOCK: thread %p pc %#llx far %#llx faulted %u times on cpu %d: %s\n", (void *)th, (unsigned long long)pc,
++	    (unsigned long long)far, sweet_ll[slot].n, cur->cpu_id, target != PROCESSOR_NULL ? "moving it to another cpu" : "no other cpu running");
++	if (target != PROCESSOR_NULL) {
++		processor_t old = thread_bind(target);
++		thread_block(THREAD_CONTINUE_NULL);
++		thread_bind(old);
++	}
++}
++
+ static void
+ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr,
+     fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
+@@ -1387,6 +1438,10 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
+ 			vm_fault_addr = tbi_clear(fault_addr);
+ 		}
+ 
++		if (is_translation_fault(fault_code)) {
++			sweet_livelock_check(state, vm_fault_addr);
++		}
++
+ 		/* check to see if it is just a pmap ref/modify fault */
+ 		if (!is_translation_fault(fault_code)) {
+ 			result = arm_fast_fault(map->pmap,
