@@ -7,6 +7,8 @@
  * them ("*" = all, "-NAME" excludes NAME); the rest get none, so their frameworks take their CPU paths.
  * Log: /dev/console and /var/local/mtl2.log (when it exists, mode 666), lines "MTL2[pid name]: ...".
  */
+#include <mach/mach.h>
+#include <mach/vm_map.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
@@ -55,9 +57,32 @@ static void sm2_log(const char *fmt, ...)
  */
 extern "C" void sys_dcache_flush(void *start, size_t len)
 {
+	/*
+	 * Only what is mapped and readable is cleaned: a range that runs past the end of its mapping (the bridge and the frontend round lengths up to rows,
+	 * pages and padded pitches, and the caller's memory may stop short of that) used to fault in `dc civac` at the first byte after the mapping and kill
+	 * backboardd (SIGSEGV, five crashes in six boots). One vm_region_64 per mapping the range touches (about 3 us).
+	 */
 	uintptr_t a = (uintptr_t)start & ~(uintptr_t)63, end = (uintptr_t)start + len;
-	for (; a < end; a += 64)
-		__asm__ volatile("dc civac, %0" :: "r"(a) : "memory");
+	while (a < end) {
+		vm_address_t addr = (vm_address_t)a;
+		vm_size_t size = 0;
+		vm_region_basic_info_data_64_t info;
+		mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+		mach_port_t object = MACH_PORT_NULL;
+		if (vm_region_64(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object) != KERN_SUCCESS)
+			break;                                  /* nothing mapped above a */
+		if (addr > a) {                                 /* a is in a hole: continue at the next mapping */
+			a = addr;
+			continue;
+		}
+		uintptr_t rend = (uintptr_t)addr + size;
+		if (rend > end)
+			rend = end;
+		if (info.protection & VM_PROT_READ)
+			for (; a < rend; a += 64)
+				__asm__ volatile("dc civac, %0" :: "r"(a) : "memory");
+		a = rend;
+	}
 	__asm__ volatile("dsb sy" ::: "memory");
 }
 
