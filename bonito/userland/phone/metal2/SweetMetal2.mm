@@ -18,6 +18,7 @@
 #include <stdarg.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <string.h>
 #include "NativeBridgeMetalFrontend.h"
 #include "bridge/NativeMetalObjects.h"
@@ -48,6 +49,100 @@ static void sm2_log(const char *fmt, ...)
 	vsnprintf(buf, sizeof(buf), fmt, ap);
 	va_end(ap);
 	sm2_logs(buf);
+}
+
+/*
+ * In-process sampling profiler (performance work of 2026-11-21), only when /var/local/mtl2-prof exists: every 5 ms the running threads of the process are
+ * suspended, their pc and frame-pointer chain (4 callers, read with vm_read_overwrite so a bad pointer cannot fault) are counted per thread id, and the 40 most
+ * frequent chains go to /var/local/mtl2.log every 30 s as "H count tid pc0 pc1 pc2 pc3 pc4" (cumulative; raw addresses: subtract the image bases of the "images:"
+ * line and look them up in the unstripped SweetMetal2 / libvulkan_freedreno). The kernel's own sampler caught the render thread on only 3 % of its samples.
+ */
+struct sm2_prof_rec { uint64_t tid, pc[5]; uint32_t n; };
+
+static void *sm2_profiler(void *arg)
+{
+	(void)arg;
+	static sm2_prof_rec recs[3000];
+	int nrec = 0;
+	unsigned long total = 0, ticks = 0;
+	const mach_port_t me = mach_thread_self();
+
+	for (;;) {
+		usleep(5000);
+		ticks++;
+		thread_act_array_t th = NULL;
+		mach_msg_type_number_t cnt = 0;
+		if (task_threads(mach_task_self(), &th, &cnt) == KERN_SUCCESS) {
+			for (mach_msg_type_number_t i = 0; i < cnt; i++) {
+				if (th[i] != me) {
+					thread_basic_info_data_t bi;
+					mach_msg_type_number_t bn = THREAD_BASIC_INFO_COUNT;
+					if (thread_info(th[i], THREAD_BASIC_INFO, (thread_info_t)&bi, &bn) == KERN_SUCCESS && bi.run_state == TH_STATE_RUNNING &&
+					    !(bi.flags & TH_FLAGS_IDLE)) {
+						thread_identifier_info_data_t ti;
+						mach_msg_type_number_t tn = THREAD_IDENTIFIER_INFO_COUNT;
+						uint64_t tid = thread_info(th[i], THREAD_IDENTIFIER_INFO, (thread_info_t)&ti, &tn) == KERN_SUCCESS ? ti.thread_id : i;
+						if (thread_suspend(th[i]) == KERN_SUCCESS) {
+							arm_thread_state64_t st;
+							mach_msg_type_number_t sn = ARM_THREAD_STATE64_COUNT;
+							if (thread_get_state(th[i], ARM_THREAD_STATE64, (thread_state_t)&st, &sn) == KERN_SUCCESS) {
+								sm2_prof_rec r = { .tid = tid };
+								r.pc[0] = arm_thread_state64_get_pc(st);
+								uint64_t fp = arm_thread_state64_get_fp(st);
+								r.pc[1] = arm_thread_state64_get_lr(st);
+								for (int d = 2; d < 5 && fp; d++) {
+									uint64_t pair[2];
+									vm_size_t got = 0;
+									if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof(pair), (vm_address_t)pair, &got) != KERN_SUCCESS ||
+									    got != sizeof(pair))
+										break;
+									r.pc[d] = pair[1];
+									fp = pair[0];
+								}
+								thread_resume(th[i]);
+								int at = -1;
+								for (int k = 0; k < nrec; k++)
+									if (recs[k].tid == r.tid && !memcmp(recs[k].pc, r.pc, sizeof(r.pc))) {
+										at = k;
+										break;
+									}
+								if (at < 0 && nrec < 3000) {
+									at = nrec++;
+									recs[at] = r;
+									recs[at].n = 0;
+								}
+								if (at >= 0)
+									recs[at].n++;
+								total++;
+							} else {
+								thread_resume(th[i]);
+							}
+						}
+					}
+				}
+				mach_port_deallocate(mach_task_self(), th[i]);
+			}
+			vm_deallocate(mach_task_self(), (vm_address_t)th, cnt * sizeof(th[0]));
+		}
+		if (ticks % 6000 == 0) {        /* every 30 s */
+			sm2_log("H samples %lu chains %d", total, nrec);
+			for (int top = 0; top < 40; top++) {
+				int best = -1;
+				for (int k = 0; k < nrec; k++)
+					if (recs[k].n && !(recs[k].n & 0x80000000u) && (best < 0 || recs[k].n > recs[best].n))
+						best = k;
+				if (best < 0)
+					break;
+				sm2_log("H %u %llu %llx %llx %llx %llx %llx", recs[best].n, (unsigned long long)recs[best].tid, (unsigned long long)recs[best].pc[0],
+					(unsigned long long)recs[best].pc[1], (unsigned long long)recs[best].pc[2], (unsigned long long)recs[best].pc[3],
+					(unsigned long long)recs[best].pc[4]);
+				recs[best].n |= 0x80000000u;    /* shown in this round; cleared below */
+			}
+			for (int k = 0; k < nrec; k++)
+				recs[k].n &= 0x7fffffffu;
+		}
+	}
+	return NULL;
 }
 
 /*
@@ -248,6 +343,14 @@ static bool listed(void)
 		if (vk)
 			dladdr(vk, &tu);
 		sm2_log("images: SweetMetal2 %p, libvulkan_freedreno %p", self.dli_fbase, tu.dli_fbase);
+		if (device && !strcmp(getprogname(), "backboardd") && access("/var/local/mtl2-prof", F_OK) == 0) {
+			pthread_t pt;
+			pthread_attr_t pa;
+			pthread_attr_init(&pa);
+			pthread_attr_setdetachstate(&pa, PTHREAD_CREATE_DETACHED);
+			pthread_create(&pt, &pa, sm2_profiler, NULL);
+			sm2_log("profiler started");
+		}
 		/* backboardd: the frontend's counters every 10 s, into /var/local/mtl2.log only (with /var/local/mtl2-telemetry) */
 		if (device && !strcmp(getprogname(), "backboardd"))
 			dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
