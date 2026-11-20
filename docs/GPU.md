@@ -295,3 +295,21 @@ core in every idle test) and is now the default: unique backboardd command buffe
 GPU). The GPU is no longer the limit for most frames; what is left is CPU time in the translation layer, memory bandwidth (GPU buffers are mapped
 non-cacheable, no DDR vote on this phone) and the 30 Hz panel copy. Next: a DDR/BCM vote for the SDM670 RSC (the generic RPMh code of patch 0102 is
 written for the SM8150 RSC at 0x18220000, SDM670's apps_rsc is at 0x179e0000), and a look at what backboardd spends its time on between submits.
+
+## Visual state with the fast GPU (2026-11-20 12:00-12:20, kernel run 44729614830, normal iOS appearance; logs/vis1.png, vis300.png, vis400b.png, hid2.png)
+
+How to look: boot-arg `sweetshot=SECS` makes the kernel save the panel frame every SECS seconds (two slots at the end of userdata); `ci-cycle.sh` with `SHOT=1` pulls the
+newest one into logs/NAME.png (the screenshot is the frame at the END of the run; without sweetshot= it is stale console text). `sweethidtest=30` presses Home every 30 s.
+
+What renders correctly: the Home Screen (icons, labels, dock and Search pill as translucent blue, battery, clock), the lock screen with a gradient wallpaper, the
+rounded corners. Known wrong or missing: the Photos widget is a solid white box (the widget's own content, chronod); a 4x18 pixel black/white bar near the screen
+centre (x 510-513, y 1431-1448) appears in some frames and not in others (source not found: nothing in the patches draws it, it may be a layer of iOS itself).
+
+Transient status-bar glitch: vis1.png (400 MHz) and vis300.png (300 MHz, another boot) show the SAME garbled top strip (streaks of white and green lines where the
+clock and battery should be, ragged black corners), vis400b.png (same boot-args as vis1, another boot) shows a clean status bar "4:11". Identical garbage in two
+boots at different clocks means a deterministic frame of the animation (the snapshots are taken at a fixed time after the same Home press and boot timing
+varies by a few seconds), not random corruption and not clock related. The streaks are sheared copies of the status bar's white (clock) and green (battery)
+elements: the signature of a texture read with a wrong row pitch, or of stale CPU-cache lines in a buffer the CPU just redrew (SpringBoard draws the status bar on the CPU into
+an IOSurface that the GPU then samples through a non-coherent mapping; the kernel leaves cache maintenance of imported pages to the client: patch 0115 note).
+Next steps: capture more transition frames (sweetshot=1 with sweetreboot aligned to a press), compare the IOSurface bytesPerRow of the status bar layer with the pitch the
+bridge gives Turnip, and check where the bridge flushes the CPU cache before a submit (its own `_sys_dcache_flush`).
