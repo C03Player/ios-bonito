@@ -395,3 +395,14 @@ Remaining per-frame costs (all on the render thread): about 50 ms of encoding (u
 Presents per 5 s in the gesture loop: median 42.5, mean 44.0, against median 42.0, mean 42.9 at 400 MHz: no gain. A 50 % faster GPU does not make the animation faster, so the GPU is no longer the limit with asynchronous submits;
 the default stays 400 MHz / vote 256 (less power, lower vote). Telemetry of the same run (logs, mtl2.log of boot prof4): a typical frame is 11 render passes, 101 draws and 7.2 Mpixels shaded (3.1 screens of blur and compositing), command buffer commit to complete
 130-170 ms, no-copy cache flush 9 ms and surface cache flush 3 ms per command buffer (54 flushes, 54 MB per frame), 107 pipelines built in 5.6 s over the whole boot. What is left is the render thread's own CPU time (about 50 ms of encoding per frame).
+
+### Torn frames after asynchronous submits, and patch 0182 (2026-11-21, logs/zt1-2, ck3, fx1-4)
+
+The user saw a badly broken screen during the 0181 tests. Snapshots confirmed it (zt1, ck3: tile-shaped blocks of the previous frame inside the new one, a doubled search field); my row-pitch score (coherence at pitch 1080) does not see this kind of damage, so snapshots must be looked at, not only scored.
+Cause: the panel copy runs in the vsync tick from the pending swap record and CoreAnimation swaps at "scheduled"; before 0180 a submit returned when the GPU was done, so every surface was complete when it was copied. Fix (0182): `sweet_gpu_wait_submitted()`
+(bonito_gpu.c) waits, at most 100 ms, for the fence that was the newest when it is called, and `sweet_fb_flush_src` calls it before the copy reads a surface. The wait is on the tick thread; the render thread is not held.
+Result, kernel run 44835558964, 4 boots without panic, hang dump or crash: 3 of 4 snapshots clean, no tile-shaped blocks; fx2 shows a horizontal split at about 20 % of the height (top: a newer, blurred frame; bottom: the previous frame): the panel is scanned out
+while the CPU copy writes it, a plain scan-line tear, still there. Swaps per second (from the real time between "SWEET FB: 5s" lines, which are 7 s apart after 0182 because the waits stretch the tick; boot time 100-215 s of the gesture loop):
+0179 synchronous 5.0 (median), 0181 7.0, 0182 8.6. The wait did not cost frame rate. Next for the tearing: copy in scan order or double-buffer the panel copy.
+In-process profiler (SweetMetal2.mm, marker file /var/local/mtl2-prof; only in userland runs 44832564660 and 44835114391): samples with no frame in our own images are system-library waits and drown the rest; the frontend's per-call rows
+(Z call ..., run 44828719915) say per frame: draws 32 ms (65 at 0.5 ms), commit 24 ms, endEncoding 10 ms, flushes 5.6 ms, new render encoder 4 ms. The phone currently runs the plugin of run 44828719915 (no profiler).
