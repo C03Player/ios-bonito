@@ -1,0 +1,73 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -2157,6 +2157,58 @@
+ 	lck_mtx_unlock(&g6_lock);
+ }
+ 
++/*
++ * Patch 0177: a test stimulus, boot-arg sweetswipe=SECS. A kernel thread drives the touch screen through the touch path itself (SweetHID, panel
++ * pixels 1080x2160, finger 8) after SECS seconds, in a loop: pull down from the middle (Spotlight with its blur on the home screen), the home
++ * gesture from the bottom edge (closes it), a page swipe and back. A Home press on the home screen changes nothing on it, so sweethidtest alone
++ * never makes the screen animate; this does, the way a hand does.
++ */
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++static int g6_swipe_chan;
++
++static void
++g6_swipe_wait(int ms)
++{
++	int ticks = (hz * ms + 999) / 1000;
++
++	(void)tsleep(&g6_swipe_chan, PZERO, "g6swipe", ticks > 0 ? ticks : 1);
++}
++
++static void
++g6_swipe(int x1, int y1, int x2, int y2, int ms)
++{
++	int steps = ms / 20 > 2 ? ms / 20 : 2;
++
++	for (int i = 0; i <= steps; i++) {
++		sweet_hid_touch(8, 1, x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps);
++		g6_swipe_wait(20);
++	}
++	sweet_hid_touch(8, 0, x2, y2);
++}
++
++static void
++g6_swipe_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	int start = 75;
++
++	PE_parse_boot_argn("sweetswipe", &start, sizeof(start));
++	g6_swipe_wait(start * 1000);
++	printf("SWEET SWIPE: gesture loop starts\n");
++	for (unsigned n = 0;; n++) {
++		g6_swipe(540, 700, 540, 1500, 300);             /* pull down: Spotlight */
++		g6_swipe_wait(1500);
++		g6_swipe(540, 2150, 540, 1300, 250);            /* home gesture: closes it */
++		g6_swipe_wait(1200);
++		g6_swipe(950, 900, 150, 900, 250);              /* next page */
++		g6_swipe_wait(1000);
++		g6_swipe(150, 900, 950, 900, 250);              /* and back */
++		g6_swipe_wait(1000);
++		if ((n & 7) == 0) {
++			printf("SWEET SWIPE: round %u\n", n);
++		}
++	}
++}
++
+ void
+ sweet_gpu615_start(void)
+ {
+@@ -2199,5 +2251,10 @@
+ 	if (kernel_thread_start(g6_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
++	uint32_t swipe = 0;
++	if (PE_parse_boot_argn("sweetswipe", &swipe, sizeof(swipe)) && swipe &&
++	    kernel_thread_start(g6_swipe_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
