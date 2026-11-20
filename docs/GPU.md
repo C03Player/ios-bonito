@@ -201,3 +201,20 @@ Not seen yet: GPU rendering confirmed on screen, `vktest`/`m2vtest` results (the
   so test programs got `VK_ERROR_OUT_OF_DEVICE_MEMORY`. Boot with `sweetgpureserve=16 sweetgpucap=128`.
 - Live edits of the phone's volume: `bonito/tools/hfsx_write.py adb:/dev/block/mmcblk0p72 ...` in the recovery after a `sweetnoinit=1` boot (xnu 0159: replays and flushes the journal, unmounts, resets).
   Drop the recovery's caches (`adb shell 'echo 3 > /proc/sys/vm/drop_caches'`) before reading back through the mass-storage LUN.
+
+## ROOT CAUSE FOUND: Turnip works on the Adreno 615 (2026-11-20, patches 0167 and 0168)
+
+`vktest` (Vulkan through Turnip, run alone on the GPU, cpus=1) went from 3 FAIL to ALL PASS:
+fill+copy 1 MB 0 wrong words, a compute shader compiled on the phone 0 wrong of 65536, a 256x256 draw 20808 red and 44728 blue pixels,
+0 other, with no GPU hang and no SMMU fault in the kernel log (log: logs/vk168.txt, vktest.log).
+
+- 0168 was the bug: SweetAccelerator hands `sweet_gpu_map_at` a list of **4K** pages (one physical address per 4K step, the VM page
+  is 16K), and the bonito wrapper mapped each entry as a **16K run** (`PAGE_SIZE`). Four PTEs per entry then pointed at the next
+  12K after each page, i.e. the wrong physical memory behind most of every buffer (74 % of the words wrong, the same number every run).
+  The draw's `cdcdcdcd` was the CPU's own initial fill, never overwritten. Fix: map them as 4K pages.
+- 0167 (Linux a6xx_submit wrapper: CCU invalidates in front, the fence written by a CACHE_FLUSH_TS event) is correct and stays, but was
+  not the cause of the wrong data.
+- The hangs seen in other boots were from other Metal clients (backboardd, SpringBoard, ...) and from `m2vtest` running the bridge
+  at the same time, not from the Turnip command streams themselves; to be re-checked now that the mappings are right.
+- So the earlier "GPU wedges on the first real Turnip IB" theory (hang dumps, blit tests 30/31) was chasing a symptom of the same
+  wrong mapping: the IB itself was fetched from a mapping that pointed at the wrong pages. The blit tests are still valid as hardware checks (2D blit works from high and low RAM).
