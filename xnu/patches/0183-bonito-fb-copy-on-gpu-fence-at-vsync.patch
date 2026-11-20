@@ -1,0 +1,90 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -2187,18 +2187,25 @@
+ }
+ 
+ /*
+- * Patch 0182: the CPU copy of a frame to the panel (SweetFramebuffer.cpp, in the vsync tick) must not read a surface the GPU is still drawing. Until the asynchronous
+- * submits (0180) a submit returned only when the GPU was done, so a frame was complete whenever the swap arrived; now CoreAnimation swaps at "scheduled" and the copy
+- * caught half-rendered frames (tile-shaped blocks of the old frame, a doubled search field). Wait, at most 100 ms, for the GPU to finish what has been submitted
+- * so far (a newer frame's work is not waited for: the fence is read once).
++ * Patches 0182 and 0183: the CPU copy of a frame to the panel (SweetFramebuffer.cpp, in the vsync tick) must not read a surface the GPU is still drawing. Until the
++ * asynchronous submits (0180) a submit returned only when the GPU was done, so a frame was complete whenever the swap arrived; now CoreAnimation swaps at
++ * "scheduled" and the copy caught half-rendered frames (tile-shaped blocks of the old frame, a doubled search field). The swap records the newest fence
++ * (sweet_gpu_latest_fence) and the vsync tick copies only when the GPU has written it (sweet_gpu_fence_done), else it tries again on the next tick: no thread waits,
++ * and a copy always starts on a vsync (0182 waited inside the copy: 55-78 ms per copy, started at any point of the scan-out and tore the panel along one line).
+  */
+-void
+-sweet_gpu_wait_submitted(void)
++uint32_t
++sweet_gpu_latest_fence(void)
++{
++	return __atomic_load_n(&g6_fence, __ATOMIC_RELAXED);
++}
++
++int
++sweet_gpu_fence_done(uint32_t fence)
+ {
+ 	if (!g6_ready || !g6_async) {
+-		return;
+-	}
+-	(void)g6_wait_fence_ms(__atomic_load_n(&g6_fence, __ATOMIC_RELAXED), 100);
++		return 1;
++	}
++	return (int32_t)(g6_fence_done() - fence) >= 0;
+ }
+ 
+ int
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -48,7 +48,8 @@
+ 	uint32_t fb_pitch, uint32_t corner_radius, uint32_t *out_dx, uint32_t *out_dy,
+ 	uint32_t *out_dw, uint32_t *out_dh);
+ void sweet_gpu_panel_stride(uint32_t stride);
+-void sweet_gpu_wait_submitted(void);       /* bsd/dev/bonito_gpu.c, patch 0182: the GPU has finished what was submitted */
++uint32_t sweet_gpu_latest_fence(void);   /* bsd/dev/bonito_gpu.c, patch 0183: newest fence submitted */
++int sweet_gpu_fence_done(uint32_t fence);   /* the GPU has written it */
+ extern int sweet_display_fit_x, sweet_display_fit_y, sweet_display_fit_w, sweet_display_fit_h;
+ }
+ #define SWEET_FB_GPU_ROWBYTES           4352    /* the 2D engine writes 64-byte multiples */
+@@ -135,6 +136,8 @@
+ 	bool          fConsolePaused;
+ 	uint8_t       fPending[SWEET_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
+ 	bool          fDirty;
++	uint32_t      fPendingFence;  /* patch 0183: newest GPU fence when the pending swap arrived: copy only once the GPU has written it */
++	uint32_t      fPendingSkips;  /* ticks the copy has been held back for it (at most 6, then it copies anyway) */
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	bool          fGPU;           /* panel switched to the GPU's stride; frames scaled to fit */
+@@ -336,7 +339,11 @@
+ 		}
+ 		return;
+ 	}
+-	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
++	bool flush = fb->fDirty && ((count % fb->fFlushTicks) == 0 || fb->fPendingSkips > 0);
++	if (flush && fb->fPendingSkips < 6 && !sweet_gpu_fence_done(fb->fPendingFence)) {
++		fb->fPendingSkips++;    /* patch 0183: the GPU has not finished this frame: next tick */
++		flush = false;
++	}
+ 	uint8_t *rec = NULL;
+ 	if (flush) {
+ 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+@@ -396,6 +403,8 @@
+ {
+ 	IOLockLock(fLock);
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
++	fPendingFence = sweet_gpu_latest_fence();
++	fPendingSkips = 0;
+ 	fDirty = true;
+ 	IOLockUnlock(fLock);
+ 	if ((++sweet_fb_swap_count % 1000) == 0) {
+@@ -427,7 +436,6 @@
+ {
+ 	uintptr_t a = va & ~(uintptr_t)63, end = va + len;
+ 
+-	sweet_gpu_wait_submitted();             /* patch 0182: not while the GPU is still drawing the frame */
+ 	for (; a < end; a += 64) {
+ 		__asm__ volatile ("dc civac, %0" :: "r" (a) : "memory");
+ 	}
