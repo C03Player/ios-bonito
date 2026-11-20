@@ -1,0 +1,63 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1611,7 +1611,13 @@
+ 	return got;
+ }
+ 
+-/* 0: the GPU has written `fence` (or a later one); -1: not within timeout_ms (the hang is dumped once) */
++static int g6_wait_chan;
++
++/*
++ * 0: the GPU has written `fence` (or a later one); -1: not within timeout_ms. Patch 0181: the waiter spins for the first 0.4 ms and then sleeps in 200 us timer steps (the first
++ * version spun for the whole wait: several waiting threads kept five cores busy in delay() and a kernel allocation then failed with no page to give); only a wait of a second
++ * or more that times out is reported as a hang (a poll with a tiny timeout is not one).
++ */
+ static int
+ g6_wait_fence_ms(uint32_t fence, uint32_t timeout_ms)
+ {
+@@ -1626,16 +1632,23 @@
+ 		if (ns > (uint64_t)timeout_ms * 1000000ull) {
+ 			break;
+ 		}
+-		if ((++spins & 63) == 0) {
++		if ((++spins & 15) == 0) {
+ 			lck_mtx_lock(&g6_lock);
+ 			(void)g6_clear_fault();         /* a translation fault stalls the GPU until the context bank's FSR is cleared; the fence then lands */
+ 			lck_mtx_unlock(&g6_lock);
+ 		}
+-		delay(50);
+-	}
+-	lck_mtx_lock(&g6_lock);
+-	g6_hang_dump();
+-	lck_mtx_unlock(&g6_lock);
++		if (spins < 20) {
++			delay(20);
++		} else {
++			(void)assert_wait_timeout((event_t)&g6_wait_chan, THREAD_UNINT, 200, NSEC_PER_USEC);
++			(void)thread_block(THREAD_CONTINUE_NULL);
++		}
++	}
++	if (timeout_ms >= 1000) {
++		lck_mtx_lock(&g6_lock);
++		g6_hang_dump();
++		lck_mtx_unlock(&g6_lock);
++	}
+ 	return -1;
+ }
+ 
+@@ -1673,6 +1686,14 @@
+ 
+ 	if (!g6_ready || n == 0 || n > 16) {
+ 		return -1;
++	}
++	/* back-pressure: the render server must not queue frames (and the memory they hold) without bound: at most 3 batches in flight */
++	{
++		uint32_t newest = __atomic_load_n(&g6_fence, __ATOMIC_RELAXED);
++
++		if ((int32_t)(newest - g6_fence_done()) >= 3) {
++			(void)g6_wait_fence_ms(newest - 2, 2000);
++		}
+ 	}
+ 	lck_mtx_lock(&g6_lock);
+ 	fence = g6_fence + 1;
