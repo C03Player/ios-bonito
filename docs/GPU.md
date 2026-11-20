@@ -286,3 +286,12 @@ Result (unique command buffers of backboardd, commit to completion): median 723 
 over 30 draws (transitions) 1856 -> 125 ms; driver submit time avg 66-115 -> 5.9 ms, max 1.8 s -> 104 ms.
 The earlier theories (sysmem mode, Reduce Transparency, the DDR vote, 10 Hz panel copies) were not the cause (the 10 Hz cap of
 `sweetfb_hz` was real but secondary: 0171 made it 30 Hz).
+
+### Default clock 400 MHz (patch 0175, 2026-11-20, kernel run 44729614830, logs/ft6.txt and ft7.txt)
+
+`sweetgpuclk=400 sweetgpulvl=256` (NOM vote, vendor table: 430 MHz at that level) is stable (no hang, no SMMU fault, probes read a 200 MHz counter = 400 MHz
+core in every idle test) and is now the default: unique backboardd command buffers median 34-44 ms (300 MHz: 48), transitions (over 30 draws) 107-113 ms
+(300 MHz: 125, crystal: 1856). Swap bursts during a Home press are about 2.4 fps against 1.0 (crystal, GPU path) and 5 (CPU fallback path, which was not the
+GPU). The GPU is no longer the limit for most frames; what is left is CPU time in the translation layer, memory bandwidth (GPU buffers are mapped
+non-cacheable, no DDR vote on this phone) and the 30 Hz panel copy. Next: a DDR/BCM vote for the SDM670 RSC (the generic RPMh code of patch 0102 is
+written for the SM8150 RSC at 0x18220000, SDM670's apps_rsc is at 0x179e0000), and a look at what backboardd spends its time on between submits.
