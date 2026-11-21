@@ -423,3 +423,18 @@ What the user saw ("the GPU only updates parts of the image, chunks use the old 
 3. **Still about 1 boot in 12 after 0188**: whole GPU render bins keep an older frame. Every aligned edge the detector found lies at x = multiple of 224 or y = multiple of 288, so the GMEM bin is 224x288 pixels. Experiments queued (kernel 0190: sweetgpuwfi=1 CP_WAIT_FOR_IDLE after every IB, sweetgpubatch=N, sweetgpuasync=0 = old behavior; TU_DEBUG=nobin and =sysmem through /var/local/mtl2-tu-debug).
 
 Tools: `bonito/tools/shot-seams.py IMAGE...` (pure Python; aligned step edges at multiples of 32 pixels, the rectangles they form, full-width seams; the score counts blocks and aligned edges, not bands: the keyboard top and the dock are natural full-width edges), `sweet-shot-pull.py` (both slots, or all 16 with patch 0189: newest = NAME.png, then -prev, -sNN), `seam-sweep.sh KERNEL_RUN NAME N "boot-args"` + `sweep-report.py` (one line per boot: hangs, crashes, swaps/s, images with a block; `logs/seam-sweep.txt`), `set-phone-file.sh` (replace a file on the phone's volume after a journal-flush boot). Pitfalls: `sweetswipe=SECS` is the START delay of the gestures, not their length (SWIPE=210 meant no gestures before the reset: a whole series of idle boots); sweetshot=2 made 3 of 10 boots die about 28 s in (the first snapshot, during the boot storm), sweetshot=7 did not; the pull tool shows an earlier boot's frames when the boot died before its first snapshot (check the log length); never `pkill`/`ps|grep|kill` with a pattern that occurs in your own command line (it killed the shell twice).
+
+### Root cause of the blocks of older frames: the panel copy ran while the GPU still rendered (0192; series of 2026-11-21)
+
+Series of 10 gesture boots each (16 snapshots a boot, `bonito/tools/seam-sweep.sh`, `logs/seam-sweep.txt`), kernel 0188 plus the switches of 0190/0191, share of snapshots with a rectangle on the 224x288 bin grid:
+| setting | images with a block | GPU hangs | swaps/s |
+|---|---|---|---|
+| 16 IBs per fence (the 0188 default) | 11 of 160 (6.9 %) | 0 | 9.6 |
+| + CP_WAIT_FOR_IDLE after every IB (sweetgpuwfi=1) | 14 of 160 (8.8 %) | 0 | 9.6 |
+| 1 IB per fence (sweetgpubatch=1) | 0 of 160 | 0 | 6.5 |
+| TU_DEBUG=nobin (no hardware binning: every draw in every bin) | 24 of 160 (15.0 %) | 0 | 9.4 |
+| **16 IBs per fence + the copy fix of 0192** | **0 of 160** | 0 | **9.5** |
+(sweetswipe=SECS is the START delay of the gestures: a series with 210 saw no gestures; sweetshot=2 killed 3 of 10 boots about 28 s in.)
+Reading: the more GPU work in flight (slower GPU with nobin: more, batches: fewer fences) the more half-rendered frames the CPU copy caught; the cause is in the copy, not in the GPU's writes. CoreAnimation swaps at "scheduled", possibly before the frame's work was submitted, so
+the fence recorded at the swap (0183) was an older one; the copy ran during the render, the bins rendered last (the bottom rows) were still old, and since no swap follows the half-rendered picture stayed on the panel. 0192: the tick copies only while the GPU is idle (all submitted work done, at most
+12 ticks of waiting) and copies again after any GPU work that followed the last copy. 0193 makes 16 IBs per fence and sweetfb_sync=450 the defaults (no boot-args needed).
