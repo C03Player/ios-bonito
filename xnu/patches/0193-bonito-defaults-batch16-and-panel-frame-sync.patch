@@ -1,0 +1,35 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -2303,7 +2303,9 @@
+  * held a rectangle of an older frame (whole 224x288 render bins), with one IB per fence none in 160, with or without a CP_WAIT_FOR_IDLE between the IBs (0190's sweetgpuwfi: no change). One IB per
+  * fence costs speed (6.5 swaps/s against 9.6), mostly through the in-flight limit, which counts fences: sweetgpuinflight=N (default 3) raises it.
+  */
+-static uint32_t g6_batch_max = 1;
++/* Patch 0193: 16 again. The blocks of older frames were the panel copy running while the GPU still rendered the frame (0192), not the batching: 16 IBs per fence with 0192 gave 0 blocks in
++ * 160 snapshots at 9.5 swaps/s, one IB per fence 6.5 swaps/s. */
++static uint32_t g6_batch_max = 16;
+ 
+ /* up to 16 IBs in order; the fence of the last (0: the GPU is not usable) */
+ uint32_t
+@@ -2489,7 +2491,7 @@
+ 	PE_parse_boot_argn("sweetgpuwfi", &g6_wfi, sizeof(g6_wfi));
+ 	PE_parse_boot_argn("sweetgpubatch", &g6_batch_max, sizeof(g6_batch_max));
+ 	if (g6_batch_max < 1 || g6_batch_max > 16) {
+-		g6_batch_max = 1;
++		g6_batch_max = 16;
+ 	}
+ 	PE_parse_boot_argn("sweetgpuinflight", &g6_inflight, sizeof(g6_inflight));
+ 	if (g6_inflight < 1 || g6_inflight > 64) {
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -141,7 +141,7 @@
+  * frame is between PERMILLE and PERMILLE+150 thousandths old (7.5 ms .. 10 ms at 450): the transfer is over (an assumption: a DSC compressed frame over 4 lanes takes about
+  * 5 ms) and the copy ends before the next one begins. The tick waits for that window (at most one frame, in 50 us steps).
+  */
+-static uint32_t sweet_fb_sync_start;
++static uint32_t sweet_fb_sync_start = 450;     /* patch 0193: on by default (boot-arg sweetfb_sync=0 turns it off) */
+ 
+ static inline uint32_t
+ sweet_fb_frame_permille(void)
