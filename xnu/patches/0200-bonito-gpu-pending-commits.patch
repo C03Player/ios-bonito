@@ -1,0 +1,57 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -2626,3 +2626,33 @@
+ 	return 0;
+ }
+ SYSCTL_PROC(_kern, OID_AUTO, sweet_bind_cpu, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, sweet_bind_cpu_sysctl, "I", "bind the calling thread to a cpu, -1 unbinds");
++
++/*
++ * Patch 0200: kern.sweet_gpu_pending, write-only: the Metal plugin adds +1 when the render server commits a command buffer and -1 when the runtime's commit of it has returned (the work is then
++ * in the ring). The render server used to be held in waitUntilScheduled until its whole frame was translated and submitted (the profiler of the render thread: 71 % of its time there); with
++ * that wait skipped it swaps earlier, so the panel copy must not note "the newest fence" for a swap while a commit is still pending: sweet_gpu_pending() says so.
++ */
++static int g6_pending;
++
++int
++sweet_gpu_pending(void)
++{
++	return __atomic_load_n(&g6_pending, __ATOMIC_RELAXED);
++}
++
++static int
++sweet_gpu_pending_sysctl SYSCTL_HANDLER_ARGS
++{
++	int delta = 0, error;
++
++	error = sysctl_handle_int(oidp, &delta, 0, req);
++	if (error != 0 || req->newptr == USER_ADDR_NULL) {
++		return error;
++	}
++	int now = __atomic_add_fetch(&g6_pending, delta, __ATOMIC_RELAXED);
++	if (now < 0) {
++		__atomic_store_n(&g6_pending, 0, __ATOMIC_RELAXED);
++	}
++	return 0;
++}
++SYSCTL_PROC(_kern, OID_AUTO, sweet_gpu_pending, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, sweet_gpu_pending_sysctl, "I", "commits of the render server not yet submitted (+1 / -1)");
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -50,6 +50,7 @@
+ void sweet_gpu_panel_stride(uint32_t stride);
+ uint32_t sweet_gpu_latest_fence(void);   /* bsd/dev/bonito_gpu.c, patch 0183: newest fence submitted */
+ int sweet_gpu_fence_done(uint32_t fence);   /* the GPU has written it */
++int sweet_gpu_pending(void);                 /* patch 0200: commits of the render server not yet submitted */
+ vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ void delay(int usec);
+ extern int sweet_display_fit_x, sweet_display_fit_y, sweet_display_fit_w, sweet_display_fit_h;
+@@ -521,7 +522,7 @@
+ 	SwapEntry *pick = NULL;
+ 	for (int qi = 0; qi < 8; qi++) {
+ 		SwapEntry *e = &fb->fQueue[qi];
+-		if (e->used && !e->snapped && count >= e->tick + 2) {
++		if (e->used && !e->snapped && ((count >= e->tick + 2 && sweet_gpu_pending() == 0) || count >= e->tick + 14)) {      /* patch 0200: not while a commit is still being submitted */
+ 			e->fence = newest;
+ 			e->snapped = true;
+ 		}
