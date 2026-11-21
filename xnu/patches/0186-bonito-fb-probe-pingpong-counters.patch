@@ -1,0 +1,77 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -51,6 +51,7 @@
+ uint32_t sweet_gpu_latest_fence(void);   /* bsd/dev/bonito_gpu.c, patch 0183: newest fence submitted */
+ int sweet_gpu_fence_done(uint32_t fence);   /* the GPU has written it */
+ vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++void delay(int usec);
+ extern int sweet_display_fit_x, sweet_display_fit_y, sweet_display_fit_w, sweet_display_fit_h;
+ }
+ /*
+@@ -113,6 +114,45 @@
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ 	sweet_fb_wr(sweet_fb_ctl, 0x1c, 1);             /* one transfer of what the panel memory holds now */
+ 	sweet_fb_kick = true;
++}
++
++/*
++ * Patch 0186 (boot-arg sweetfb_probe=1, observation only, changes nothing): how does the display engine's transfer to the command-mode panel look from the CPU?
++ * Every 100 vsync ticks the tick samples PP_LINE_COUNT (0x2c, "wr_ptr" line count: lines the engine has sent to the panel) and PP_INT_COUNT_VAL (0x14, low half: the
++ * panel read pointer's line, high half its frame count) 40 times, 100 us apart, and logs them (16 times in all). With autorefresh on (the default) this shows whether a
++ * transfer is visible, how long it lasts within a 16.7 ms frame and where the panel's own scan is: the data a tear-free copy has to be timed from (kick mode, 0184/0185,
++ * left the panel frozen: a lone CTL_START does not start a transfer).
++ */
++static volatile uint8_t *sweet_fb_pprobe;
++static unsigned sweet_fb_probe_prints;
++
++static void
++sweet_fb_probe_init(void)
++{
++	sweet_fb_pprobe = (volatile uint8_t *)ml_io_map(0xae71000, 0x1000);
++	IOLog("SWEET FB: probe: pp0 mapped %p, tear_en %#x autoref %#x\n", (void *)sweet_fb_pprobe, sweet_fb_pprobe ? *(volatile uint32_t *)(sweet_fb_pprobe + 0) : 0,
++	    sweet_fb_pprobe ? *(volatile uint32_t *)(sweet_fb_pprobe + 0x30) : 0);
++}
++
++static void
++sweet_fb_probe_burst(uint64_t count)
++{
++	uint32_t lc[40], ic[40];
++
++	if (sweet_fb_pprobe == NULL || (count % 100) != 0 || sweet_fb_probe_prints >= 16) {
++		return;
++	}
++	sweet_fb_probe_prints++;
++	for (int i = 0; i < 40; i++) {
++		lc[i] = *(volatile uint32_t *)(sweet_fb_pprobe + 0x2c);
++		ic[i] = *(volatile uint32_t *)(sweet_fb_pprobe + 0x14);
++		delay(100);
++	}
++	for (int h = 0; h < 40; h += 10) {
++		IOLog("SWEET FB: probe %llu line[%d..]: %x %x %x %x %x %x %x %x %x %x  int: %x %x %x %x %x %x %x %x %x %x\n", count, h, lc[h], lc[h + 1], lc[h + 2], lc[h + 3],
++		    lc[h + 4], lc[h + 5], lc[h + 6], lc[h + 7], lc[h + 8], lc[h + 9], ic[h], ic[h + 1], ic[h + 2], ic[h + 3], ic[h + 4], ic[h + 5], ic[h + 6], ic[h + 7], ic[h + 8],
++		    ic[h + 9]);
++	}
+ }
+ 
+ static inline void
+@@ -337,6 +377,11 @@
+ 		if (kick != 0) {
+ 			sweet_fb_kick_init();
+ 		}
++		uint32_t probe = 0;
++		PE_parse_boot_argn("sweetfb_probe", &probe, sizeof(probe));
++		if (probe != 0) {
++			sweet_fb_probe_init();
++		}
+ 	}
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+@@ -435,6 +480,7 @@
+ 		}
+ 	}
+ 	IOLockUnlock(fb->fLock);
++	sweet_fb_probe_burst((uint64_t)count);
+ 	if (rec == NULL && sweet_fb_kick && (uint64_t)count - sweet_fb_last_copy >= 6) {
+ 		/*
+ 		 * Patch 0185: with autorefresh off the panel shows only what a kick sends. Memory written behind this driver's back (the kernel console while iOS boots, the
