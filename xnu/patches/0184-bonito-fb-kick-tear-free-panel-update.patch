@@ -1,53 +1,13 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -50,6 +50,7 @@
+@@ -50,8 +50,80 @@
  void sweet_gpu_panel_stride(uint32_t stride);
  uint32_t sweet_gpu_latest_fence(void);   /* bsd/dev/bonito_gpu.c, patch 0183: newest fence submitted */
  int sweet_gpu_fence_done(uint32_t fence);   /* the GPU has written it */
 +vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
  extern int sweet_display_fit_x, sweet_display_fit_y, sweet_display_fit_w, sweet_display_fit_h;
  }
- #define SWEET_FB_GPU_ROWBYTES           4352    /* the 2D engine writes 64-byte multiples */
-@@ -259,6 +260,13 @@
- 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
- 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
- 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
-+	{
-+		uint32_t kick = 0;
-+		PE_parse_boot_argn("sweetfb_kick", &kick, sizeof(kick));
-+		if (kick != 0) {
-+			sweet_fb_kick_init();
-+		}
-+	}
- 
- 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
- 	setProperty("external", false);
-@@ -340,6 +348,9 @@
- 		return;
- 	}
- 	bool flush = fb->fDirty && ((count % fb->fFlushTicks) == 0 || fb->fPendingSkips > 0);
-+	if (flush && sweet_fb_kick && (uint64_t)count - sweet_fb_last_copy < 2) {
-+		flush = false;          /* patch 0184: the transfer of the last copy may still be running */
-+	}
- 	if (flush && fb->fPendingSkips < 6 && !sweet_gpu_fence_done(fb->fPendingFence)) {
- 		fb->fPendingSkips++;    /* patch 0183: the GPU has not finished this frame: next tick */
- 		flush = false;
-@@ -356,6 +367,8 @@
- 	if (rec != NULL) {
- 		uint64_t t0 = mach_absolute_time();
- 		fb->present(rec);
-+		sweet_fb_kick_now();
-+		sweet_fb_last_copy = (uint64_t)count;
- 		fb->fStatPresentAbs += mach_absolute_time() - t0;
- 		fb->fStatPresents++;
- 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
-@@ -423,6 +436,77 @@
- 		IOLog("SWEET FB: GPU present not used: %s\n", what);
- 	}
- 	return false;
-+}
-+
 +/*
 + * Patch 0184: tear-free panel updates (boot-arg sweetfb_kick=1, default off). The panel is a command-mode DSI panel (SOFEF00 or NT37700F) that the display engine
 + * (SDE 4.0.1, MDP at 0xae00000) refreshes from the splash framebuffer on every TE pulse ("autorefresh", armed by the shim and by ABL, PINGPONG + 0x30). The CPU copy
@@ -117,6 +77,41 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +		__asm__ volatile ("dsb sy" ::: "memory");      /* the copy's stores are in memory before the transfer starts */
 +		sweet_fb_wr(sweet_fb_ctl, 0x1c, 1);
 +	}
- }
++}
++
+ #define SWEET_FB_GPU_ROWBYTES           4352    /* the 2D engine writes 64-byte multiples */
  
- /*
+ #if defined(SWEET)
+@@ -259,6 +331,13 @@
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
++	{
++		uint32_t kick = 0;
++		PE_parse_boot_argn("sweetfb_kick", &kick, sizeof(kick));
++		if (kick != 0) {
++			sweet_fb_kick_init();
++		}
++	}
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+ 	setProperty("external", false);
+@@ -340,6 +419,9 @@
+ 		return;
+ 	}
+ 	bool flush = fb->fDirty && ((count % fb->fFlushTicks) == 0 || fb->fPendingSkips > 0);
++	if (flush && sweet_fb_kick && (uint64_t)count - sweet_fb_last_copy < 2) {
++		flush = false;          /* patch 0184: the transfer of the last copy may still be running */
++	}
+ 	if (flush && fb->fPendingSkips < 6 && !sweet_gpu_fence_done(fb->fPendingFence)) {
+ 		fb->fPendingSkips++;    /* patch 0183: the GPU has not finished this frame: next tick */
+ 		flush = false;
+@@ -356,6 +438,8 @@
+ 	if (rec != NULL) {
+ 		uint64_t t0 = mach_absolute_time();
+ 		fb->present(rec);
++		sweet_fb_kick_now();
++		sweet_fb_last_copy = (uint64_t)count;
+ 		fb->fStatPresentAbs += mach_absolute_time() - t0;
+ 		fb->fStatPresents++;
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
