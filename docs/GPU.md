@@ -406,3 +406,11 @@ while the CPU copy writes it, a plain scan-line tear, still there. Swaps per sec
 0179 synchronous 5.0 (median), 0181 7.0, 0182 8.6. The wait did not cost frame rate. Next for the tearing: copy in scan order or double-buffer the panel copy.
 In-process profiler (SweetMetal2.mm, marker file /var/local/mtl2-prof; only in userland runs 44832564660 and 44835114391): samples with no frame in our own images are system-library waits and drown the rest; the frontend's per-call rows
 (Z call ..., run 44828719915) say per frame: draws 32 ms (65 at 0.5 ms), commit 24 ms, endEncoding 10 ms, flushes 5.6 ms, new render encoder 4 ms. The phone currently runs the plugin of run 44828719915 (no profiler).
+
+### 0183: copy on the swap's fence at the vsync (2026-11-21, kernel run 44839915279, logs/gv1-4)
+
+0182 made the copy wait for the GPU inside the vsync tick: an average copy took 55-78 ms (6 ms without the wait) and started at any point of the panel's scan-out. 0183 replaces the wait: `AppleCLCD::swap` records `sweet_gpu_latest_fence()` with the pending swap, the tick copies only when
+`sweet_gpu_fence_done(fence)` (held back at most 6 ticks, then it copies anyway), otherwise the next tick tries again. No thread waits; a copy starts on a vsync tick.
+Result, 4 boots (two of 963 s), no panic, hang dump or crash: average copy 6.5 ms again, swaps per second median 7.8 (mean 7.9; 0182 8.6, 0181 7.0, 0179 5.0: within the noise of 0181/0182). Snapshots: gv1-gv3 clean; gv4 (mid-animation) shows three horizontal seams (y 247, 1080, 1797 of 2000) between sharp and blurred bands.
+No tile-shaped block of an old frame in any of the 8 snapshots of 0182/0183 (zt1 and ck3 of 0181 had them). The horizontal seams (fx2 had one) are probably the snapshot itself: sweetshot reads the panel memory, which is uncached and slow (some tens of ms for 9 MB), while the 30 Hz copy keeps
+writing it, so one snapshot spans several copies and shows a seam at each copy boundary; a tear on the glass cannot be read by a snapshot at all. Not proven. To prove it: take the snapshot from the source surface or while the copy lock is held.
