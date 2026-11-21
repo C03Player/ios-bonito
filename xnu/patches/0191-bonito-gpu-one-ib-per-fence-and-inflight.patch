@@ -1,0 +1,49 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1068,6 +1068,7 @@
+  * 0167 dropped it), sweetgpubatch=N caps the IBs per batch (default 16; 1 = the pre-0179 one-IB-one-fence behavior).
+  */
+ static int g6_wfi;
++static uint32_t g6_inflight = 3;        /* patch 0191: fences (batches) in flight at most, boot-arg sweetgpuinflight */
+ int bonito_gpu_submit(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms);
+ 
+ bool
+@@ -1713,8 +1714,8 @@
+ 	{
+ 		uint32_t newest = __atomic_load_n(&g6_fence, __ATOMIC_RELAXED);
+ 
+-		if ((int32_t)(newest - g6_fence_done()) >= 3) {
+-			(void)g6_wait_fence_ms(newest - 2, 2000);
++		if ((int32_t)(newest - g6_fence_done()) >= (int32_t)g6_inflight) {
++			(void)g6_wait_fence_ms(newest - (g6_inflight - 1), 2000);
+ 		}
+ 	}
+ 	lck_mtx_lock(&g6_lock);
+@@ -2297,7 +2298,12 @@
+ 	bonito_gpu_unmap(iova, len);
+ }
+ 
+-static uint32_t g6_batch_max = 16;
++/*
++ * Patch 0191: one IB per batch (and fence) is the default. Series of gesture boots with 16 snapshots each (logs/seam-sweep.txt): with up to 16 IBs behind one fence 7 to 9 % of the snapshots
++ * held a rectangle of an older frame (whole 224x288 render bins), with one IB per fence none in 160, with or without a CP_WAIT_FOR_IDLE between the IBs (0190's sweetgpuwfi: no change). One IB per
++ * fence costs speed (6.5 swaps/s against 9.6), mostly through the in-flight limit, which counts fences: sweetgpuinflight=N (default 3) raises it.
++ */
++static uint32_t g6_batch_max = 1;
+ 
+ /* up to 16 IBs in order; the fence of the last (0: the GPU is not usable) */
+ uint32_t
+@@ -2483,7 +2489,11 @@
+ 	PE_parse_boot_argn("sweetgpuwfi", &g6_wfi, sizeof(g6_wfi));
+ 	PE_parse_boot_argn("sweetgpubatch", &g6_batch_max, sizeof(g6_batch_max));
+ 	if (g6_batch_max < 1 || g6_batch_max > 16) {
+-		g6_batch_max = 16;
++		g6_batch_max = 1;
++	}
++	PE_parse_boot_argn("sweetgpuinflight", &g6_inflight, sizeof(g6_inflight));
++	if (g6_inflight < 1 || g6_inflight > 64) {
++		g6_inflight = 3;
+ 	}
+ 	if (enabled >= 4) {
+ 		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
