@@ -11,6 +11,7 @@
 #import <IOSurface/IOSurfaceRef.h>
 #import <objc/runtime.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -726,8 +727,8 @@ static void waitForResource(id resource) {
 }
 - (void)dispatch:(MTLSize)size group:(MTLSize)group threads:(bool)threads {
  gDispatches++;self.commandBuffer->encodedWork.dispatches++;
- const uint64_t s[3]={size.width,size.height,size.depth},g[3]={group.width,group.height,group.depth};
- [self run:"dispatch" call:^bool{return nmb_compute_dispatch(self.handle,s,g,threads);}];
+ const std::array<uint64_t,3> s={{size.width,size.height,size.depth}},g={{group.width,group.height,group.depth}};
+ [self run:"dispatch" call:^bool{return nmb_compute_dispatch(self.handle,s.data(),g.data(),threads);}];
 }
 - (void)dispatchThreads:(MTLSize)t threadsPerThreadgroup:(MTLSize)g {[self dispatch:t group:g threads:true];}
 - (void)dispatchThreadgroups:(MTLSize)t threadsPerThreadgroup:(MTLSize)g {[self dispatch:t group:g threads:false];}
@@ -766,12 +767,12 @@ static void waitForResource(id resource) {
  [self run:"setDepthStencilState" call:^bool{return nmb_render_set_depth_stencil(self.handle,state?[(NBDepthStencil *)state handle]:nullptr);}];
 }
 - (void)setViewport:(MTLViewport)v {
- const double values[6]={v.originX,v.originY,v.width,v.height,v.znear,v.zfar};
- [self run:"setViewport" call:^bool{return nmb_render_set_viewport(self.handle,values);}];
+ const std::array<double,6> values={{v.originX,v.originY,v.width,v.height,v.znear,v.zfar}};
+ [self run:"setViewport" call:^bool{return nmb_render_set_viewport(self.handle,values.data());}];
 }
 - (void)setScissorRect:(MTLScissorRect)r {
- const uint64_t values[4]={r.x,r.y,r.width,r.height};
- [self run:"setScissorRect" call:^bool{return nmb_render_set_scissor(self.handle,values);}];
+ const std::array<uint64_t,4> values={{r.x,r.y,r.width,r.height}};
+ [self run:"setScissorRect" call:^bool{return nmb_render_set_scissor(self.handle,values.data());}];
 }
 // The runtime takes cull mode, winding and fill mode together; this encoder keeps Metal's defaults until each is set.
 - (void)raster {
@@ -804,7 +805,7 @@ static void waitForResource(id resource) {
  [self run:"setStencilReferenceValues" call:^bool{return nmb_render_set_stencil_reference(self.handle,f,b);}];
 }
 - (void)setBlendColorRed:(float)r green:(float)g blue:(float)b alpha:(float)a {
- const float c[4]={r,g,b,a};[self run:"setBlendColor" call:^bool{return nmb_render_set_blend_color(self.handle,c);}];
+ const std::array<float,4> c={{r,g,b,a}};[self run:"setBlendColor" call:^bool{return nmb_render_set_blend_color(self.handle,c.data());}];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i baseInstance:(NSUInteger)b {
  gDraws++;self.commandBuffer->encodedWork.draws++;
@@ -866,8 +867,8 @@ static void waitForResource(id resource) {
 - (void)copyFromTexture:(id<MTLTexture>)s sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)z
               toTexture:(id<MTLTexture>)d destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dO {
  if(![self textures:NB_OBJECTS(s,d) count:2])return;
- const uint64_t a[3]={so.x,so.y,so.z},size[3]={z.width,z.height,z.depth},b[3]={dO.x,dO.y,dO.z};
- [self run:"copyFromTexture:toTexture:" call:^bool{return nmb_blit_copy_texture(self.handle,[(NBTexture *)s handle],ss,sl,a,size,[(NBTexture *)d handle],ds,dl,b);}];
+ const std::array<uint64_t,3> a={{so.x,so.y,so.z}},size={{z.width,z.height,z.depth}},b={{dO.x,dO.y,dO.z}};
+ [self run:"copyFromTexture:toTexture:" call:^bool{return nmb_blit_copy_texture(self.handle,[(NBTexture *)s handle],ss,sl,a.data(),size.data(),[(NBTexture *)d handle],ds,dl,b.data());}];
 }
 - (void)copyFromTexture:(id<MTLTexture>)s toTexture:(id<MTLTexture>)d {
  if(![self textures:NB_OBJECTS(s,d) count:2])return;
@@ -882,14 +883,14 @@ static void waitForResource(id resource) {
             sourceSize:(MTLSize)z toTexture:(id<MTLTexture>)d destinationSlice:(NSUInteger)slice destinationLevel:(NSUInteger)level
      destinationOrigin:(MTLOrigin)dO {
  if(![self buffers:NB_OBJECTS(s) count:1] || ![self textures:NB_OBJECTS(d) count:1])return;
- const uint64_t size[3]={z.width,z.height,z.depth},b[3]={dO.x,dO.y,dO.z};
- [self run:"copyFromBuffer:toTexture:" call:^bool{return nmb_blit_buffer_to_texture(self.handle,[(NBBuffer *)s handle],o,row,image,size,[(NBTexture *)d handle],slice,level,b);}];
+ const std::array<uint64_t,3> size={{z.width,z.height,z.depth}},b={{dO.x,dO.y,dO.z}};
+ [self run:"copyFromBuffer:toTexture:" call:^bool{return nmb_blit_buffer_to_texture(self.handle,[(NBBuffer *)s handle],o,row,image,size.data(),[(NBTexture *)d handle],slice,level,b.data());}];
 }
 - (void)copyFromTexture:(id<MTLTexture>)s sourceSlice:(NSUInteger)slice sourceLevel:(NSUInteger)level sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)z
                toBuffer:(id<MTLBuffer>)d destinationOffset:(NSUInteger)o destinationBytesPerRow:(NSUInteger)row destinationBytesPerImage:(NSUInteger)image {
  if(![self textures:NB_OBJECTS(s) count:1] || ![self buffers:NB_OBJECTS(d) count:1])return;
- const uint64_t a[3]={so.x,so.y,so.z},size[3]={z.width,z.height,z.depth};
- [self run:"copyFromTexture:toBuffer:" call:^bool{return nmb_blit_texture_to_buffer(self.handle,[(NBTexture *)s handle],slice,level,a,size,[(NBBuffer *)d handle],o,row,image);}];
+ const std::array<uint64_t,3> a={{so.x,so.y,so.z}},size={{z.width,z.height,z.depth}};
+ [self run:"copyFromTexture:toBuffer:" call:^bool{return nmb_blit_texture_to_buffer(self.handle,[(NBTexture *)s handle],slice,level,a.data(),size.data(),[(NBBuffer *)d handle],o,row,image);}];
 }
 - (void)generateMipmapsForTexture:(id<MTLTexture>)t {
  if(![self textures:NB_OBJECTS(t) count:1])return;
