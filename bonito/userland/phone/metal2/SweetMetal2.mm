@@ -59,6 +59,48 @@ static void sm2_log(const char *fmt, ...)
  * addr" (cumulative; raw addresses: subtract the image bases of the "images:" line and look them up in the unstripped binaries), with "H samples kept/seen".
  */
 static uint64_t sm2_prof_lo, sm2_prof_hi;
+/*
+ * The render server's busiest calling thread (set by the frontend when it binds it to a gold core): the profiler samples it every 5 ms whatever its state, running or blocked, because the render
+ * thread commits a frame only every 106 ms though its own work is about 16 ms, and the running-only sampling cannot say what it waits for. "HR count state: frames" rows every 30 s, the frames named
+ * with dladdr (exported symbols only: the dyld shared cache has no local ones).
+ */
+extern "C" { uint64_t sm2_render_tid = 0; }
+struct sm2_rrec { int state; uint64_t pc[5]; unsigned n; };
+static sm2_rrec sm2_rrecs[800];
+static int sm2_nrr;
+static unsigned long sm2_rstate[8];
+
+static void sm2_rname(uint64_t a, char *out, size_t size)
+{
+	Dl_info di;
+	if (a && dladdr((void *)(uintptr_t)a, &di) && di.dli_fname) {
+		const char *base = strrchr(di.dli_fname, '/');
+		snprintf(out, size, "%s`%s+%#lx", base ? base + 1 : di.dli_fname, di.dli_sname ? di.dli_sname : "?", (unsigned long)(a - (uint64_t)(uintptr_t)(di.dli_saddr ? di.dli_saddr : di.dli_fbase)));
+	} else {
+		snprintf(out, size, "%llx", (unsigned long long)a);
+	}
+}
+
+static void sm2_rdump(void)
+{
+	sm2_log("HR render thread %#llx samples: running %lu waiting %lu uninterruptible %lu other %lu", (unsigned long long)sm2_render_tid, sm2_rstate[TH_STATE_RUNNING], sm2_rstate[TH_STATE_WAITING],
+		sm2_rstate[TH_STATE_UNINTERRUPTIBLE], sm2_rstate[0]);
+	for (int top = 0; top < 30; top++) {
+		int best = -1;
+		for (int k = 0; k < sm2_nrr; k++)
+			if (sm2_rrecs[k].n && !(sm2_rrecs[k].n & 0x80000000u) && (best < 0 || sm2_rrecs[k].n > sm2_rrecs[best].n))
+				best = k;
+		if (best < 0)
+			break;
+		char n[5][96];
+		for (int d = 0; d < 5; d++)
+			sm2_rname(sm2_rrecs[best].pc[d], n[d], sizeof n[d]);
+		sm2_log("HR %u state %d: %s < %s < %s < %s < %s", sm2_rrecs[best].n, sm2_rrecs[best].state, n[0], n[1], n[2], n[3], n[4]);
+		sm2_rrecs[best].n |= 0x80000000u;
+	}
+	for (int k = 0; k < sm2_nrr; k++)
+		sm2_rrecs[k].n &= 0x7fffffffu;
+}
 
 struct sm2_prof_ent { uint64_t addr; uint32_t n; };
 
@@ -107,6 +149,51 @@ static void *sm2_profiler(void *arg)
 		mach_msg_type_number_t cnt = 0;
 		if (task_threads(mach_task_self(), &th, &cnt) == KERN_SUCCESS) {
 			for (mach_msg_type_number_t i = 0; i < cnt; i++) {
+				if (th[i] != me && sm2_render_tid) {
+					thread_identifier_info_data_t ti;
+					mach_msg_type_number_t tn = THREAD_IDENTIFIER_INFO_COUNT;
+					if (thread_info(th[i], THREAD_IDENTIFIER_INFO, (thread_info_t)&ti, &tn) == KERN_SUCCESS && ti.thread_id == sm2_render_tid) {
+						thread_basic_info_data_t b2;
+						mach_msg_type_number_t bn2 = THREAD_BASIC_INFO_COUNT;
+						const int state = thread_info(th[i], THREAD_BASIC_INFO, (thread_info_t)&b2, &bn2) == KERN_SUCCESS ? b2.run_state : 0;
+						if (thread_suspend(th[i]) == KERN_SUCCESS) {
+							arm_thread_state64_t st;
+							mach_msg_type_number_t sn = ARM_THREAD_STATE64_COUNT;
+							sm2_rrec r = { .state = state };
+							const bool ok = thread_get_state(th[i], ARM_THREAD_STATE64, (thread_state_t)&st, &sn) == KERN_SUCCESS;
+							if (ok) {
+								r.pc[0] = arm_thread_state64_get_pc(st);
+								r.pc[1] = arm_thread_state64_get_lr(st);
+								uint64_t fp = arm_thread_state64_get_fp(st);
+								for (int d = 2; d < 5 && fp; d++) {
+									uint64_t pair[2];
+									vm_size_t got = 0;
+									if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof(pair), (vm_address_t)pair, &got) != KERN_SUCCESS || got != sizeof(pair))
+										break;
+									r.pc[d] = pair[1];
+									fp = pair[0];
+								}
+							}
+							thread_resume(th[i]);
+							if (ok) {
+								sm2_rstate[(state >= 1 && state <= 5) ? state : 0]++;
+								int at = -1;
+								for (int k = 0; k < sm2_nrr; k++)
+									if (sm2_rrecs[k].state == r.state && !memcmp(sm2_rrecs[k].pc, r.pc, sizeof r.pc)) {
+										at = k;
+										break;
+									}
+								if (at < 0 && sm2_nrr < 800) {
+									at = sm2_nrr++;
+									sm2_rrecs[at] = r;
+									sm2_rrecs[at].n = 0;
+								}
+								if (at >= 0)
+									sm2_rrecs[at].n++;
+							}
+						}
+					}
+				}
 				if (th[i] != me) {
 					thread_basic_info_data_t bi;
 					mach_msg_type_number_t bn = THREAD_BASIC_INFO_COUNT;
@@ -155,6 +242,8 @@ static void *sm2_profiler(void *arg)
 			sm2_log("H samples kept %lu seen %lu leaves %d addresses %d", kept, seen, nleaf, nall);
 			sm2_prof_dump("HL", leaf, nleaf);
 			sm2_prof_dump("HA", all, nall);
+			if (sm2_render_tid)
+				sm2_rdump();
 		}
 	}
 	return NULL;

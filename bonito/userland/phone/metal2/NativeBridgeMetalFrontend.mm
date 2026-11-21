@@ -80,6 +80,7 @@ static thread_local bool tlsIsWorker=false;
 // The kernel runs all eight cores as one cluster, but 0-5 are Cortex-A55 (silver, 1.7 GHz) and 6-7 Cortex-A75 (gold, 2.0 GHz, 2.3 times as fast on dependent adds): a hot thread was on a silver core
 // three times out of four. kern.sweet_bind_cpu (xnu patch 0196) binds the calling thread: the translation worker goes to cpu 6, the busiest calling thread (the render server's) to cpu 7.
 // /var/local/mtl2-bind starting with 0 turns it off.
+extern "C" uint64_t sm2_render_tid;     // SweetMetal2.mm: the profiler samples this thread in every state
 static bool gBind=true;
 static std::atomic<int> gBoundWorker{-2},gBoundCaller{-2};
 static int bindThisThread(int cpu) {
@@ -110,7 +111,7 @@ static void workerMain() {
 // Queue a block (copied to the heap); returns its sequence number. With threading off, or on the worker itself, it just runs.
 static uint64_t enqueueWork(dispatch_block_t block) {
  if(!gThreaded || tlsIsWorker){@autoreleasepool{block();}return 0;}
- if(++tlsCalls==3000 && gBoundCaller.load()==-2)gBoundCaller=bindThisThread(7);     // the thread that queues this much is the render server's
+ if(++tlsCalls==3000 && gBoundCaller.load()==-2){gBoundCaller=bindThisThread(7);uint64_t t=0;pthread_threadid_np(NULL,&t);sm2_render_tid=t;}     // the thread that queues this much is the render server's
  std::call_once(gWorkerOnce,[]{
   pthread_attr_t attr;pthread_attr_init(&attr);pthread_attr_setstacksize(&attr,4u<<20);
   pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
