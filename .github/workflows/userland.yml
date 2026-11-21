@@ -72,6 +72,7 @@ jobs:
           mkdir -p ../../out-userland
           COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf ../../out-userland/SweetMetal2.bundle.tar.gz -C phone/metal2/out SweetMetal2.bundle
           cp phone/metal2/out/m2vtest ../../out-userland/
+          cp phone/metal2/out/SweetMetal2.unstripped ../../out-userland/
           cp phone/turnip/out/vktest phone/turnip/out/libvulkan_freedreno.dylib ../../out-userland/
           ls -la ../../out-userland
 

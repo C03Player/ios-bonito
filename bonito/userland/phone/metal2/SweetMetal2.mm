@@ -52,7 +52,7 @@ static void sm2_log(const char *fmt, ...)
 }
 
 /*
- * In-process sampling profiler (performance work of 2026-11-21), only when /var/local/mtl2-prof exists: every 5 ms the running threads of the process are
+ * In-process sampling profiler (performance work of 2026-11-21), only when /var/local/mtl2-prof starts with 1: every 5 ms the running threads of the process are
  * suspended, their pc and frame-pointer chain (4 callers, read with vm_read_overwrite so a bad pointer cannot fault) are looked at, and a sample is kept when at
  * least one of the 5 addresses lies inside SweetMetal2 or libvulkan_freedreno (threads waiting in system libraries are not counted). Two tables are
  * kept: the leaf address (pc) and every address of the chain; every 30 s the 150 most frequent of each go to /var/local/mtl2.log as "HL count pc" and "HA count
@@ -358,7 +358,12 @@ static bool listed(void)
 		if (vk)
 			dladdr(vk, &tu);
 		sm2_log("images: SweetMetal2 %p, libvulkan_freedreno %p", self.dli_fbase, tu.dli_fbase);
-		if (device && !strcmp(getprogname(), "backboardd") && access("/var/local/mtl2-prof", F_OK) == 0) {
+		bool prof_on = false;
+		if (FILE *pf = fopen("/var/local/mtl2-prof", "r")) {        /* the profiler runs only when the file starts with 1 (any other content: off) */
+			prof_on = fgetc(pf) == '1';
+			fclose(pf);
+		}
+		if (device && !strcmp(getprogname(), "backboardd") && prof_on) {
 			pthread_t pt;
 			pthread_attr_t pa;
 			sm2_prof_lo = (uint64_t)(uintptr_t)(self.dli_fbase < tu.dli_fbase ? self.dli_fbase : (tu.dli_fbase ? tu.dli_fbase : self.dli_fbase));
