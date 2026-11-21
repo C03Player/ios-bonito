@@ -1,0 +1,58 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -1480,6 +1480,12 @@
+  */
+ #define SWEET_SHOT_MAX_BYTES    (10u << 20)
+ #define SWEET_SHOT_BLOCKS       (1 + SWEET_SHOT_MAX_BYTES / UFS_BLOCK)
++/*
++ * Patch 0189: SWEET_SHOT_SLOTS snapshots instead of two (the last 16 frames: with sweetshot=2 the last 32 s of a boot, many of them in the middle of an animation, which is
++ * where the blocks of old frames show). Slot i lies at logbase - 8 - (1 + i) * SWEET_SHOT_BLOCKS as before; the header's `secs` field holds a per-boot nonce so a reader does not mix
++ * in the frames an earlier boot left in slots this boot has not written yet.
++ */
++#define SWEET_SHOT_SLOTS        16
+ 
+ struct sweet_shot_header {
+ 	char magic[8];
+@@ -1495,11 +1501,11 @@
+ {
+ 	static int chan;
+ 	uint64_t logbase = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
+-	uint64_t seq = 0;
++	uint64_t seq = 0, nonce = mach_absolute_time() | 1;
+ 	void *bounce = (void *)(su.dma + DMA_BOUNCE);
+ 
+-	printf("SWEET SHOT: framebuffer snapshot every %u s into two slots below the log (block 0x%llx)\n",
+-	    sweet_shot_period, logbase - 8 - 2 * (uint64_t)SWEET_SHOT_BLOCKS);
++	printf("SWEET SHOT: framebuffer snapshot every %u s into %d slots below the log (block 0x%llx), boot nonce %llx\n",
++	    sweet_shot_period, SWEET_SHOT_SLOTS, logbase - 8 - SWEET_SHOT_SLOTS * (uint64_t)SWEET_SHOT_BLOCKS, nonce);
+ 	for (;;) {
+ 		(void)tsleep(&chan, PZERO, "sweetshot", hz * (int)sweet_shot_period);
+ 		PE_Video v;
+@@ -1514,7 +1520,7 @@
+ 		if (fbva == 0) {
+ 			continue;
+ 		}
+-		uint64_t slot = logbase - 8 - (1 + (seq & 1)) * (uint64_t)SWEET_SHOT_BLOCKS;
++		uint64_t slot = logbase - 8 - (1 + (seq % SWEET_SHOT_SLOTS)) * (uint64_t)SWEET_SHOT_BLOCKS;
+ 		int error = 0;
+ 		for (uint64_t off = 0; off < bytes && !error; off += BOUNCE_SIZE) {
+ 			uint32_t n = (uint32_t)MIN((uint64_t)BOUNCE_SIZE, bytes - off);
+@@ -1530,7 +1536,7 @@
+ 			struct sweet_shot_header h = {
+ 				.magic = { 'S', 'W', 'E', 'E', 'T', 'S', 'H', 'T' }, .version = 1,
+ 				.width = (uint32_t)v.v_width, .height = (uint32_t)v.v_height, .rowbytes = (uint32_t)v.v_rowBytes,
+-				.seq = shot, .secs = shot * sweet_shot_period,
++				.seq = shot, .secs = nonce,
+ 			};
+ 			lck_mtx_lock(&sweet_ufs_lock);
+ 			bzero(bounce, UFS_BLOCK);
+@@ -1553,7 +1559,7 @@
+ 	thread_t thread;
+ 
+ 	PE_parse_boot_argn("sweetshot", &secs, sizeof(secs));
+-	if (secs == 0 || secs > 600 || !su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS + 2 * SWEET_SHOT_BLOCKS + 16) {
++	if (secs == 0 || secs > 600 || !su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS + SWEET_SHOT_SLOTS * SWEET_SHOT_BLOCKS + 16) {
+ 		return;
+ 	}
+ 	sweet_shot_period = secs;
