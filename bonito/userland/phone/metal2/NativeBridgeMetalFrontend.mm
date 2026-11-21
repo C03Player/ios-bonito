@@ -131,6 +131,54 @@ static void waitWork(uint64_t seq) {
  std::unique_lock<std::mutex> lock(gWorkLock);
  gDoneCv.wait(lock,[seq]{return gWorkDone>=seq;});
 }
+// The submit stage (2026-11-21): the cache flush, the callbacks' registration and the runtime's commit of a command buffer run on a second thread, in commit order. A commit waits in the kernel for the GPU
+// whenever three batches are in flight (about 40 % of the submits, about a quarter of all the time, 11 ms each in a gesture run): done on the translation worker that wait kept it from translating the next
+// frame. Now the worker only queues the commit and goes on.
+static std::mutex gSubLock;
+static std::condition_variable gSubCv,gSubDoneCv;
+static std::deque<dispatch_block_t> gSubWork;
+static uint64_t gSubEnqueued=0,gSubDone=0;              // under gSubLock
+static std::atomic<uint64_t> gSubBusyUs{0},gSubOps{0};
+static std::once_flag gSubOnce;
+static void submitMain() {
+ tlsIsWorker=true;                  // waits issued from here return at once (no waiting on ourselves)
+ pthread_setname_np("m2v-submit");
+ bindThisThread(6);
+ for(;;) {
+  dispatch_block_t block=nil;
+  {
+   std::unique_lock<std::mutex> lock(gSubLock);
+   gSubCv.wait(lock,[]{return !gSubWork.empty();});
+   block=gSubWork.front();gSubWork.pop_front();
+  }
+  const uint64_t began=nowUs();
+  @autoreleasepool{block();}
+  gSubBusyUs+=nowUs()-began;gSubOps++;
+  block=nil;
+  {std::lock_guard<std::mutex> lock(gSubLock);gSubDone++;}
+  gSubDoneCv.notify_all();
+ }
+}
+static uint64_t enqueueSubmit(dispatch_block_t block) {
+ if(!gThreaded){@autoreleasepool{block();}return 0;}
+ std::call_once(gSubOnce,[]{
+  pthread_attr_t attr;pthread_attr_init(&attr);pthread_attr_setstacksize(&attr,4u<<20);
+  pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
+  pthread_t t;pthread_create(&t,&attr,[](void *)->void *{submitMain();return nullptr;},nullptr);
+ });
+ std::unique_lock<std::mutex> lock(gSubLock);
+ gSubDoneCv.wait(lock,[]{return gSubWork.size()<1024;});
+ gSubWork.push_back([block copy]);
+ const uint64_t seq=++gSubEnqueued;
+ lock.unlock();
+ gSubCv.notify_one();
+ return seq;
+}
+static void waitSubmit(uint64_t seq) {
+ if(!seq || tlsIsWorker)return;
+ std::unique_lock<std::mutex> lock(gSubLock);
+ gSubDoneCv.wait(lock,[seq]{return gSubDone>=seq;});
+}
 static Timed gTimePipeline,gTimeLibrary,gTimeFunction,gTimeEncodeToCommit;
 static Timed gTimeWaitScheduled,gTimeWaitCompleted;
 static Timed gTimeResourceWait;
@@ -626,7 +674,7 @@ static void notified(void *context,uint64_t value) {
 @property(nonatomic,strong) dispatch_group_t handlers;
 @property(nonatomic,strong) dispatch_group_t schedulingHandlers;
 @property(nonatomic) BOOL schedulingDelivered;
-@property(atomic) uint64_t lastSeq;
+@property(atomic) uint64_t lastSeq,lastSubmitSeq;
 - (void)refuse:(NSString *)what;
 - (void)defer:(dispatch_block_t)block;     // run on the translation worker, in order
 - (void)drain;                             // wait until everything deferred so far has run
@@ -937,7 +985,7 @@ static void scheduled(void *context);
  const uint64_t seq=enqueueWork(block);
  if(seq)self.lastSeq=seq;
 }
-- (void)drain {waitWork(self.lastSeq);}
+- (void)drain {waitWork(self.lastSeq);waitSubmit(self.lastSubmitSeq);}     // the worker first (it queues the commit), then the submit stage
 - (MTLCommandBufferStatus)status {
  if(self.failedLocally)return MTLCommandBufferStatusError;
  if(self.committed)[self drain];
@@ -1094,6 +1142,10 @@ static void scheduled(void *context);
  [self defer:^{[self commitOnWorker];}];
 }
 - (void)commitOnWorker {
+ const uint64_t seq=enqueueSubmit(^{[self submitStage];});
+ if(seq)self.lastSubmitSeq=seq;
+}
+- (void)submitStage {
  if(!self.encodeFailure) {
   TIMED_CALL("flushAll",({flushSurfaces(_surfaces);flushNoCopy(_resourceOwners);true;}));
   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
@@ -1909,6 +1961,7 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
   (unsigned long long)gNoCopyFlushBytes.load(),(unsigned long long)gTimeNoCopyFlush.total.load(),(unsigned long long)gTimeNoCopyFlush.slowest.load());
  row("J device answers cached hits=%llu misses=%llu",(unsigned long long)gAnswerHits.load(),(unsigned long long)gAnswerMisses.load());
  row("J bind worker cpu %d caller cpu %d (-1 refused, -2 not yet, -3 off)",gBoundWorker.load(),gBoundCaller.load());
+ row("J submit stage ops=%llu busy=%llums",(unsigned long long)gSubOps.load(),(unsigned long long)(gSubBusyUs.load()/1000));
  row("J translate worker %s ops=%llu busy=%llums peak queue=%llu",gThreaded?"on":"off",(unsigned long long)gWorkOps.load(),(unsigned long long)(gWorkBusyUs.load()/1000),(unsigned long long)gWorkPeak.load());
  for(int i=0,n=gCallRowCount.load();i<n;i++)if(gCallRows[i].t.count.load()>0)
   row("Z call %s n=%llu us=%llu max=%llu",gCallRows[i].name,(unsigned long long)gCallRows[i].t.count.load(),(unsigned long long)gCallRows[i].t.total.load(),(unsigned long long)gCallRows[i].t.slowest.load());
