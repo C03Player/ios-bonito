@@ -1,0 +1,21 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -459,7 +459,7 @@
+ 	g6_log_levels("gfx.lvl");
+ 	g6_log_levels("mx.lvl");
+ 	g6_log_levels("cx.lvl");
+-	uint32_t want_lvl = 256;                /* patches 0174/0175: NOM, enough for the 400 MHz default of sweetgpuclk (was 64, LOW_SVS = 180 MHz at most) */
++	uint32_t want_lvl = 384;                /* patch 0197: TURBO, for the 600 MHz default (series pa/pb of 2026-11-21: 12.3 swaps/s against 10.7 at 400 MHz once the CPU side was faster) */                /* patches 0174/0175: NOM, enough for the 400 MHz default of sweetgpuclk (was 64, LOW_SVS = 180 MHz at most) */
+ 	PE_parse_boot_argn("sweetgpulvl", &want_lvl, sizeof(want_lvl));
+ 	if (!g6_arc_idx("gfx.lvl", "mx.lvl", want_lvl, &pri, &sec, &vlvl)) {
+ 		printf("SWEET GPU615: C1: no vote indices for level %u; stopping\n", want_lvl);
+@@ -1488,7 +1488,7 @@
+ static void
+ g6_gpu_clock_up(void)
+ {
+-	uint32_t mhz = 400, field, cfg;
++	uint32_t mhz = 600, field, cfg;      /* patch 0197: 600 MHz (GPLL0 / 1), was 400 */
+ 
+ 	PE_parse_boot_argn("sweetgpuclk", &mhz, sizeof(mhz));
+ 	if (mhz == 0) {
