@@ -92,7 +92,7 @@ def main():
             tot['fps'].append(fps)
         if cps:
             tot['cps'].append(cps)
-    lines.append('SERIES %s: %d boots, %d with a block, %d of %d images with a block (%.1f%%), %d with a GPU hang, mean score per image %.1f, swaps/s median %.1f' % (
+    lines.append('SERIES %s: %d boots, %d with a block, %d of %d images with a block (%.1f%%), %d with a GPU hang, mean score per image %.1f, swaps/s median %.1f, panel copies/s median %.1f' % (
         name, tot['boots'], tot['blockboots'], tot.get('blockimgs', 0), tot['images'], 100.0 * tot.get('blockimgs', 0) / max(1, tot['images']), tot['hangboots'], tot['score'] / max(1, tot['images']), statistics.median(tot['fps']) if tot['fps'] else 0, statistics.median(tot['cps']) if tot['cps'] else 0))
     with open(os.path.join(ROOT, 'logs', 'seam-sweep.txt'), 'a') as f:
         f.write('\n'.join(lines) + '\n')
