@@ -1,0 +1,64 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -285,6 +285,10 @@
+ 	uint32_t      fPendingSkips;  /* ticks the copy has been held back for it (at most 12, then it copies anyway) */
+ 	uint32_t      fCopiedFence;   /* patch 0192: the newest GPU fence when the last copy began */
+ 	bool          fHaveCopied;
++	uint64_t      fSwapTick;      /* patch 0194: the vsync tick of the latest swap (or of the GPU work that asks for a copy) */
++	uint64_t      fDirtySince;    /* the tick a copy was first wanted */
++	uint32_t      fSnapFence;     /* the newest GPU fence two ticks after fSwapTick: the work of the frame shown */
++	bool          fSnapValid;
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	bool          fGPU;           /* panel switched to the GPU's stride; frames scaled to fit */
+@@ -508,19 +512,32 @@
+ 	uint32_t newest = sweet_gpu_latest_fence();
+ 	if (!fb->fDirty && fb->fHaveCopied && fb->fCopiedFence != newest) {
+ 		fb->fDirty = true;      /* GPU work since the last copy: show its result */
+-	}
+-	bool flush = fb->fDirty && ((count % fb->fFlushTicks) == 0 || fb->fPendingSkips > 0);
++		fb->fSwapTick = fb->fDirtySince = count;
++		fb->fSnapValid = false;
++	}
++	/*
++	 * Patch 0194: 0192 copied only while the GPU was completely idle: with the GPU busy half of the time most frames were skipped and the panel showed 3.8 copies a second for 9.6
++	 * frames a second the render server produced (5.0 before 0192). The fence to wait for is the one of the frame being shown: the newest one two ticks (33 ms) after the latest swap,
++	 * by when its work has been submitted (CoreAnimation swaps at "scheduled", possibly just before the submit) and before the next frame's work is (that is not waited for); a copy
++	 * starts when that fence is done, the next one follows any GPU work that came after (above).
++	 */
++	if (fb->fDirty && !fb->fSnapValid && (count >= fb->fSwapTick + 2 || count >= fb->fDirtySince + 12)) {
++		fb->fSnapFence = newest;
++		fb->fSnapValid = true;
++	}
++	bool flush = fb->fDirty && fb->fSnapValid && ((count % fb->fFlushTicks) == 0 || fb->fPendingSkips > 0);
+ 	if (flush && sweet_fb_kick && (uint64_t)count - sweet_fb_last_copy < 2) {
+ 		flush = false;          /* patch 0184: the transfer of the last copy may still be running */
+ 	}
+-	if (flush && fb->fPendingSkips < 12 && !sweet_gpu_fence_done(newest)) {
+-		fb->fPendingSkips++;    /* patch 0192: the GPU is still busy (0183 looked at the fence of the swap): next tick */
++	if (flush && fb->fPendingSkips < 12 && !sweet_gpu_fence_done(fb->fSnapFence)) {
++		fb->fPendingSkips++;    /* patch 0194: the frame's GPU work is not done: next tick */
+ 		flush = false;
+ 	}
+ 	if (flush) {
+-		fb->fCopiedFence = newest;
++		fb->fCopiedFence = fb->fSnapFence;
+ 		fb->fHaveCopied = true;
+ 		fb->fPendingSkips = 0;
++		fb->fSnapValid = false;
+ 	}
+ 	uint8_t *rec = NULL;
+ 	if (flush) {
+@@ -595,6 +612,11 @@
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+ 	fPendingFence = sweet_gpu_latest_fence();
+ 	fPendingSkips = 0;
++	fSwapTick = fVsyncCount;                /* patch 0194: the frame's GPU work is waited for from two ticks after this */
++	if (!fDirty) {
++		fDirtySince = fVsyncCount;
++	}
++	fSnapValid = false;
+ 	fDirty = true;
+ 	IOLockUnlock(fLock);
+ 	if ((++sweet_fb_swap_count % 1000) == 0) {
