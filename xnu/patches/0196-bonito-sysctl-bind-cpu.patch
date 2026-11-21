@@ -1,0 +1,44 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -45,6 +45,8 @@
+ #include <vm/vm_kern.h>
+ #include <arm/caches_internal.h>
+ #include <libkern/libkern.h>
++#include <sys/sysctl.h>
++#include <kern/processor.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern int hz;
+@@ -2527,3 +2529,31 @@
+ 	}
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
++
++/*
++ * Patch 0196: kern.sweet_bind_cpu, write-only: the calling thread binds itself to that cpu (-1: unbinds). The kernel treats the eight cores as one homogeneous cluster (mkadt.py: cluster-type
++ * SMP), but cores 0-5 are Kryo 360 Silver (Cortex-A55, 1708 MHz, 853 M dependent adds/s measured) and 6-7 Gold (A75, 1996 MHz, 1995 M/s): a heavy thread ran on a silver core three times out of
++ * four (a profile of the render server's hot thread: 80 % of its samples on cores 0-5). The Metal plugin binds its translation worker to cpu 6 and the render server's busiest caller to cpu 7.
++ */
++static int
++sweet_bind_cpu_sysctl SYSCTL_HANDLER_ARGS
++{
++	int cpu = -1, error;
++
++	error = sysctl_handle_int(oidp, &cpu, 0, req);
++	if (error != 0 || req->newptr == USER_ADDR_NULL) {
++		return error;
++	}
++	if (cpu < 0) {
++		(void)thread_bind(PROCESSOR_NULL);
++		return 0;
++	}
++	processor_t p = cpu_to_processor(cpu);
++	if (p == PROCESSOR_NULL) {
++		return EINVAL;
++	}
++	(void)thread_bind(p);
++	(void)thread_block(THREAD_CONTINUE_NULL);
++	return 0;
++}
++SYSCTL_PROC(_kern, OID_AUTO, sweet_bind_cpu, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, sweet_bind_cpu_sysctl, "I", "bind the calling thread to a cpu, -1 unbinds");
