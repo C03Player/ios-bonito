@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <deque>
 #include <pthread.h>
+#include <sys/sysctl.h>
 #include <mutex>
 #include <pthread.h>
 #include <string>
@@ -76,9 +77,21 @@ static uint64_t gWorkEnqueued=0,gWorkDone=0;            // under gWorkLock
 static std::atomic<uint64_t> gWorkBusyUs{0},gWorkOps{0},gWorkPeak{0};
 static std::once_flag gWorkerOnce;
 static thread_local bool tlsIsWorker=false;
+// The kernel runs all eight cores as one cluster, but 0-5 are Cortex-A55 (silver, 1.7 GHz) and 6-7 Cortex-A75 (gold, 2.0 GHz, 2.3 times as fast on dependent adds): a hot thread was on a silver core
+// three times out of four. kern.sweet_bind_cpu (xnu patch 0196) binds the calling thread: the translation worker goes to cpu 6, the busiest calling thread (the render server's) to cpu 7.
+// /var/local/mtl2-bind starting with 0 turns it off.
+static bool gBind=true;
+static std::atomic<int> gBoundWorker{-2},gBoundCaller{-2};
+static int bindThisThread(int cpu) {
+ if(!gBind)return -3;
+ int value=cpu;
+ return sysctlbyname("kern.sweet_bind_cpu",nullptr,nullptr,&value,sizeof value)==0?cpu:-1;
+}
+static thread_local unsigned tlsCalls=0;
 static void workerMain() {
  tlsIsWorker=true;
  pthread_setname_np("m2v-translate");
+ gBoundWorker=bindThisThread(6);
  for(;;) {
   dispatch_block_t block=nil;
   {
@@ -97,6 +110,7 @@ static void workerMain() {
 // Queue a block (copied to the heap); returns its sequence number. With threading off, or on the worker itself, it just runs.
 static uint64_t enqueueWork(dispatch_block_t block) {
  if(!gThreaded || tlsIsWorker){@autoreleasepool{block();}return 0;}
+ if(++tlsCalls==3000 && gBoundCaller.load()==-2)gBoundCaller=bindThisThread(7);     // the thread that queues this much is the render server's
  std::call_once(gWorkerOnce,[]{
   pthread_attr_t attr;pthread_attr_init(&attr);pthread_attr_setstacksize(&attr,4u<<20);
   pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
@@ -1722,6 +1736,7 @@ static void installAnswers(Class cls) {
 extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint64_t registryID,void (*missing)(const char *,const char *)) {
  if(gDeviceObject)return gDeviceObject;
  gMissing=missing;gInFlight=[NSMutableSet set];
+ if(FILE *bf=fopen("/var/local/mtl2-bind","r")){const int c=fgetc(bf);fclose(bf);if(c=='0')gBind=false;}      // cpu binding: on unless that file starts with 0
  if(FILE *tf=fopen("/var/local/mtl2-threads","r")){const int c=fgetc(tf);fclose(tf);if(c=='0')gThreaded=false;}    // the translation worker: on unless that file starts with 0
  gDevice=nmb_device_open(loader,cache);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return nil;}
@@ -1893,6 +1908,7 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
  row("J nocopy cache n=%llu bytes=%llu us=%llu max=%llu",(unsigned long long)gTimeNoCopyFlush.count.load(),
   (unsigned long long)gNoCopyFlushBytes.load(),(unsigned long long)gTimeNoCopyFlush.total.load(),(unsigned long long)gTimeNoCopyFlush.slowest.load());
  row("J device answers cached hits=%llu misses=%llu",(unsigned long long)gAnswerHits.load(),(unsigned long long)gAnswerMisses.load());
+ row("J bind worker cpu %d caller cpu %d (-1 refused, -2 not yet, -3 off)",gBoundWorker.load(),gBoundCaller.load());
  row("J translate worker %s ops=%llu busy=%llums peak queue=%llu",gThreaded?"on":"off",(unsigned long long)gWorkOps.load(),(unsigned long long)(gWorkBusyUs.load()/1000),(unsigned long long)gWorkPeak.load());
  for(int i=0,n=gCallRowCount.load();i<n;i++)if(gCallRows[i].t.count.load()>0)
   row("Z call %s n=%llu us=%llu max=%llu",gCallRows[i].name,(unsigned long long)gCallRows[i].t.count.load(),(unsigned long long)gCallRows[i].t.total.load(),(unsigned long long)gCallRows[i].t.slowest.load());
