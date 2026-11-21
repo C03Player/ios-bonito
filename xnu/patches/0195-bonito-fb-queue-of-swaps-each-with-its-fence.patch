@@ -1,0 +1,122 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -289,6 +289,14 @@
+ 	uint64_t      fDirtySince;    /* the tick a copy was first wanted */
+ 	uint32_t      fSnapFence;     /* the newest GPU fence two ticks after fSwapTick: the work of the frame shown */
+ 	bool          fSnapValid;
++	/* patch 0195: the last swaps, each with the GPU fence of its own work, and the id of the one shown last */
++	struct SwapEntry {
++		uint8_t  rec[SWEET_FB_SWAP_REC_SIZE];
++		uint64_t id, tick;
++		uint32_t fence;
++		bool     snapped, used;
++	}             fQueue[8];
++	uint64_t      fSwapSeq, fShownSeq;
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	bool          fGPU;           /* panel switched to the GPU's stride; frames scaled to fit */
+@@ -504,46 +512,51 @@
+ 		return;
+ 	}
+ 	/*
+-	 * Patch 0192: copy only while the GPU is idle, and copy again after any GPU work that came after the last copy. The panel showed whole 224x288 render bins of an older frame
+-	 * (the GMEM bins, the last ones rendered most often): CoreAnimation swaps at "scheduled", possibly before the frame's work reached the GPU, so the fence recorded at the swap (0183) was
+-	 * an older one and the copy ran while the GPU was still rendering the frame; and since no swap follows, that half-rendered picture stayed. Series with one IB per fence (fewer overlapping
+-	 * frames) showed none in 160 snapshots, with 16 per fence 7 to 9 %, with TU_DEBUG=nobin (a slower GPU, a longer render window) 15 %.
++	 * Patch 0195: show each frame once its own GPU work is done. 0192/0194 kept one snapshot of "the newest fence" that every new swap restarted: with a frame's GPU latency (about
++	 * 150 ms from commit to completion) longer than the time between swaps (about 100 ms) the wait never ended before it was forced after 12 ticks, so the panel got 3.6 copies a second for
++	 * 9.8 frames a second and some of the forced ones showed an unfinished frame. Now every swap is queued; two ticks after it (its work has been submitted by then, CoreAnimation swaps at
++	 * "scheduled") the newest fence is noted for it; the tick copies the newest queued frame whose fence is done (or that has waited 30 ticks), and forgets the older ones.
+ 	 */
+ 	uint32_t newest = sweet_gpu_latest_fence();
+-	if (!fb->fDirty && fb->fHaveCopied && fb->fCopiedFence != newest) {
+-		fb->fDirty = true;      /* GPU work since the last copy: show its result */
+-		fb->fSwapTick = fb->fDirtySince = count;
+-		fb->fSnapValid = false;
+-	}
+-	/*
+-	 * Patch 0194: 0192 copied only while the GPU was completely idle: with the GPU busy half of the time most frames were skipped and the panel showed 3.8 copies a second for 9.6
+-	 * frames a second the render server produced (5.0 before 0192). The fence to wait for is the one of the frame being shown: the newest one two ticks (33 ms) after the latest swap,
+-	 * by when its work has been submitted (CoreAnimation swaps at "scheduled", possibly just before the submit) and before the next frame's work is (that is not waited for); a copy
+-	 * starts when that fence is done, the next one follows any GPU work that came after (above).
+-	 */
+-	if (fb->fDirty && !fb->fSnapValid && (count >= fb->fSwapTick + 2 || count >= fb->fDirtySince + 12)) {
+-		fb->fSnapFence = newest;
+-		fb->fSnapValid = true;
+-	}
+-	bool flush = fb->fDirty && fb->fSnapValid && ((count % fb->fFlushTicks) == 0 || fb->fPendingSkips > 0);
++	SwapEntry *pick = NULL;
++	for (int qi = 0; qi < 8; qi++) {
++		SwapEntry *e = &fb->fQueue[qi];
++		if (e->used && !e->snapped && count >= e->tick + 2) {
++			e->fence = newest;
++			e->snapped = true;
++		}
++	}
++	for (int qi = 0; qi < 8; qi++) {
++		SwapEntry *e = &fb->fQueue[qi];
++		if (!e->used || e->id <= fb->fShownSeq || !e->snapped) {
++			continue;
++		}
++		if ((sweet_gpu_fence_done(e->fence) || count >= e->tick + 30) && (pick == NULL || e->id > pick->id)) {
++			pick = e;
++		}
++	}
++	bool flush = pick != NULL && (count % fb->fFlushTicks) == 0;
++	if (!flush && pick == NULL && fb->fDirty) {
++		flush = true;           /* a redraw of the latest frame asked for by the power-on path */
++	}
+ 	if (flush && sweet_fb_kick && (uint64_t)count - sweet_fb_last_copy < 2) {
+ 		flush = false;          /* patch 0184: the transfer of the last copy may still be running */
+-	}
+-	if (flush && fb->fPendingSkips < 12 && !sweet_gpu_fence_done(fb->fSnapFence)) {
+-		fb->fPendingSkips++;    /* patch 0194: the frame's GPU work is not done: next tick */
+-		flush = false;
+-	}
+-	if (flush) {
+-		fb->fCopiedFence = fb->fSnapFence;
+-		fb->fHaveCopied = true;
+-		fb->fPendingSkips = 0;
+-		fb->fSnapValid = false;
+ 	}
+ 	uint8_t *rec = NULL;
+ 	if (flush) {
+ 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+ 		if (rec != NULL) {
+-			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
++			if (pick != NULL) {
++				memcpy(rec, pick->rec, SWEET_FB_SWAP_REC_SIZE);
++				fb->fShownSeq = pick->id;
++				for (int qi = 0; qi < 8; qi++) {
++					if (fb->fQueue[qi].id <= pick->id) {
++						fb->fQueue[qi].used = false;
++					}
++				}
++			} else {
++				memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
++			}
+ 			fb->fDirty = false;
+ 		}
+ 	}
+@@ -612,12 +625,14 @@
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+ 	fPendingFence = sweet_gpu_latest_fence();
+ 	fPendingSkips = 0;
+-	fSwapTick = fVsyncCount;                /* patch 0194: the frame's GPU work is waited for from two ticks after this */
+-	if (!fDirty) {
+-		fDirtySince = fVsyncCount;
+-	}
+-	fSnapValid = false;
+-	fDirty = true;
++	{
++		SwapEntry *e = &fQueue[fSwapSeq % 8];   /* patch 0195: a queue of swaps instead of "the latest" */
++		memcpy(e->rec, rec, SWEET_FB_SWAP_REC_SIZE);
++		e->id = ++fSwapSeq;
++		e->tick = fVsyncCount;
++		e->snapped = false;
++		e->used = true;
++	}
+ 	IOLockUnlock(fLock);
+ 	if ((++sweet_fb_swap_count % 1000) == 0) {
+ 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
