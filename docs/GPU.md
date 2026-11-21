@@ -446,3 +446,22 @@ a frame's GPU latency (about 150 ms from commit to completion) is longer than th
 0195 keeps a queue of the last 8 swaps, each with the newest GPU fence noted two ticks after its swap (CoreAnimation swaps at "scheduled", before the frame's work was submitted), and copies the newest queued swap whose own fence is done (or that waited 30 ticks).
 Series `la` (kernel 0195, no boot-args except the test's): 10 boots, 160 snapshots, **0 with a block, 0 GPU hangs, swaps/s 9.6, panel copies/s 8.2**. 0193 made 16 IBs per fence and the panel-frame copy timing (sweetfb_sync=450) the defaults.
 Still unverified by anything but the user's eyes: horizontal tear lines (whether the copy window of 0187 is right), and whether the whole thing looks smooth.
+
+### Performance run of 2026-11-21: 5.0 to 12.4 frames a second, what each step gave
+
+Measured with the gesture series (`bonito/tools/seam-sweep.sh`: swaps per second the render server produced, panel copies per second the panel actually got, 16 snapshots a boot through the block detector; 0 stale blocks and 0 GPU hangs in every series from `la` on):
+| step | swaps/s | panel copies/s |
+|---|---|---|
+| synchronous GPU submits (0179) | 5.0 | 5.0 |
+| asynchronous submits (0180/0181) | 7.0 | 5.0 |
+| async + the copy waits for the GPU (0182/0183) | 7.8 | 5.0 |
+| copy of the newest swap whose own fence is done (0195) | 9.6 | 8.2 |
+| device answers cached, profiler off (plugin) | 10.0 | 8.0 |
+| translation on a worker thread (plugin) | 10.0 | 8.0 (no gain: the worker is busy only half of the time, the limit is frames in flight times a frame's latency, 221 ms from commit to completion) |
+| worker bound to gold core 6, busiest caller to gold core 7 (kern.sweet_bind_cpu, 0196) | 10.7 | 8.4 (a draw call 0.56 ms to 0.26 ms) |
+| GPU at 600 MHz, vote 384 (0197 default) | 12.3 | 10.0 (the GPU was the limit again once the CPU side got faster; at 400 MHz nothing changed before that) |
+| in-flight limit 6 instead of 3 | 12.5 | 9.6 (no gain, stays 3) |
+| **defaults of kernel 0197 and plugin run 44911909012, no boot-args** | **12.4** | **10.3** |
+Findings on the way: the kernel schedules the eight cores as one cluster but 0-5 are Cortex-A55 (853 M dependent adds/s) and 6-7 A75 (1995 M/s): a hot thread ran on a silver core three times in four. The in-process profiler (SweetMetal2.mm, /var/local/mtl2-prof starting with 1) with the unstripped
+plugin of the CI artifact (`symprof2.py`) put about 10 % of the render server's CPU into the runtime's device capability queries (cached now) and about 15 to 20 % into the cache cleaning loops (flushNoCopy/flushSurfaces, partly on the completion thread; not changed).
+Switches: /var/local/mtl2-threads (0 = no worker), /var/local/mtl2-bind (0 = no binding), boot-args sweetgpuclk, sweetgpulvl, sweetgpuinflight, sweetgpubatch, sweetfb_sync, sweetfb_hz. Left: the GPU takes about 73 ms a command buffer (7 Mpixel of blur and compositing a frame), the translation about 90 ms a command buffer on the worker.
