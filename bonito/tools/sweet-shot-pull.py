@@ -24,16 +24,24 @@ def main():
     u = UMS()
     ud = [p for p in gpt(u) if p[0] == 'userdata'][0]
     logbase = ud[2] + 1 - LOG_BLOCKS
-    best = None
+    found = []
     for i in (0, 1):
         slot = logbase - 8 - (1 + i) * SHOT_BLOCKS
         h = u.read(slot, 1)
         magic, ver, w, hh, rb, seq, secs = struct.unpack_from('<8sIIIIQQ', h, 0)
-        if magic == b'SWEETSHT' and (best is None or seq > best[0]):
-            best = (seq, slot, w, hh, rb)
-    if best is None:
+        if magic == b'SWEETSHT':
+            found.append((seq, slot, w, hh, rb))
+    if not found:
         sys.exit('no SWEETSHT header: no snapshot was saved (boot with sweetshot=SECS and a kernel with patch 0140)')
-    seq, slot, w, hh, rb = best
+    found.sort(reverse=True)        # newest first; the older slot is written next to it as OUT-prev.png
+    out0 = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'logs',
+                                                              time.strftime('ios-shot-%Y%m%d-%H%M%S.png'))
+    for k, (seq, slot, w, hh, rb) in enumerate(found):
+        out = out0 if k == 0 else out0[:-4] + '-prev.png' if out0.endswith('.png') else out0 + '-prev'
+        save(u, out, seq, slot, w, hh, rb)
+
+
+def save(u, out, seq, slot, w, hh, rb):
     data = u.read(slot + 1, (rb * hh + 511) // 512)[:rb * hh]
     rgb = bytearray(w * hh * 3)
     for y in range(hh):
@@ -41,9 +49,6 @@ def main():
         rgb[y * w * 3 + 0:(y + 1) * w * 3:3] = row[2::4]      # R  (bytes are B,G,R,A)
         rgb[y * w * 3 + 1:(y + 1) * w * 3:3] = row[1::4]      # G
         rgb[y * w * 3 + 2:(y + 1) * w * 3:3] = row[0::4]      # B
-    alpha = data[3::rb][:0]
-    out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'logs',
-                                                              time.strftime('ios-shot-%Y%m%d-%H%M%S.png'))
     png(out, w, hh, bytes(rgb))
     a = bytes(data[3 + y * rb + x * 4] for y in range(0, hh, 97) for x in range(0, w, 61))
     print(f'{out}: snapshot #{seq}, {w}x{hh}, rowbytes {rb}; alpha byte min {min(a)} max {max(a)} (sampled)', file=sys.stderr)
