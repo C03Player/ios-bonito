@@ -324,6 +324,12 @@ static bool listed(void)
 					opts[strcspn(opts, "\r\n")] = 0;
 				fclose(f);
 			}
+			/* 2026-11-21: Turnip renders without its tile memory (TU_DEBUG=sysmem) unless that file says otherwise: with the tile memory every pass loaded and stored whole screens
+			 * for a handful of draws; 13.8 swaps/s against 10.7 and 10.8 panel copies/s against 8.0 in gesture series. The file's content "default" leaves TU_DEBUG alone. */
+			if (!opts[0])
+				strlcpy(opts, "sysmem", sizeof(opts));
+			else if (!strcmp(opts, "default"))
+				opts[0] = 0;
 			if (opts[0]) {
 				char path[128];
 				snprintf(path, sizeof(path), "/var/local/turnip-%s.log", getprogname());
