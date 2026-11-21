@@ -1,0 +1,55 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1070,6 +1070,7 @@
+  * 0167 dropped it), sweetgpubatch=N caps the IBs per batch (default 16; 1 = the pre-0179 one-IB-one-fence behavior).
+  */
+ static int g6_wfi;
++static uint64_t g6_as_t0, g6_as_n, g6_as_ibs, g6_as_bp_n, g6_as_bp_ns, g6_as_bp_max;       /* patch 0199 */
+ static uint32_t g6_inflight = 3;        /* patch 0191: fences (batches) in flight at most, boot-arg sweetgpuinflight */
+ int bonito_gpu_submit(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms);
+ 
+@@ -1717,7 +1718,15 @@
+ 		uint32_t newest = __atomic_load_n(&g6_fence, __ATOMIC_RELAXED);
+ 
+ 		if ((int32_t)(newest - g6_fence_done()) >= (int32_t)g6_inflight) {
++			uint64_t bp0 = mach_absolute_time(), bpns;
++
+ 			(void)g6_wait_fence_ms(newest - (g6_inflight - 1), 2000);
++			absolutetime_to_nanoseconds(mach_absolute_time() - bp0, &bpns);
++			g6_as_bp_n++;
++			g6_as_bp_ns += bpns;
++			if (bpns > g6_as_bp_max) {
++				g6_as_bp_max = bpns;
++			}
+ 		}
+ 	}
+ 	lck_mtx_lock(&g6_lock);
+@@ -1769,6 +1778,27 @@
+ 	}
+ 	g6_wptr = (w + cnt) % G6_RING_DW;
+ 	g6_wr(G6_GMU(G6_CP_RB_WPTR), g6_wptr);
++	/*
++	 * Patch 0199: every 5 s one line for the asynchronous path (the synchronous one's statistics are not printed here): submits, IBs, and how often and how long the in-flight limit
++	 * (sweetgpuinflight, 3) made a submit wait: the render server's commit call took 26 to 42 ms in the plugin's timers and the profiler hardly saw it running, so it is waiting.
++	 */
++	g6_as_n++;
++	g6_as_ibs += n;
++	{
++		uint64_t now = mach_absolute_time(), since;
++
++		if (g6_as_t0 == 0) {
++			g6_as_t0 = now;
++		}
++		absolutetime_to_nanoseconds(now - g6_as_t0, &since);
++		if (since >= 5000000000ull) {
++			printf("SWEET GPU615: async submits %llu ms: %llu submits, %llu IBs, back-pressure %llu waits %llu ms total, max %llu ms\n", (unsigned long long)(since / 1000000ull),
++			    (unsigned long long)g6_as_n, (unsigned long long)g6_as_ibs, (unsigned long long)g6_as_bp_n, (unsigned long long)(g6_as_bp_ns / 1000000ull),
++			    (unsigned long long)(g6_as_bp_max / 1000000ull));
++			g6_as_t0 = now;
++			g6_as_n = g6_as_ibs = g6_as_bp_n = g6_as_bp_ns = g6_as_bp_max = 0;
++		}
++	}
+ 	lck_mtx_unlock(&g6_lock);
+ 	*fence_out = fence;
+ 	return 0;
