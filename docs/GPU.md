@@ -438,3 +438,11 @@ Series of 10 gesture boots each (16 snapshots a boot, `bonito/tools/seam-sweep.s
 Reading: the more GPU work in flight (slower GPU with nobin: more, batches: fewer fences) the more half-rendered frames the CPU copy caught; the cause is in the copy, not in the GPU's writes. CoreAnimation swaps at "scheduled", possibly before the frame's work was submitted, so
 the fence recorded at the swap (0183) was an older one; the copy ran during the render, the bins rendered last (the bottom rows) were still old, and since no swap follows the half-rendered picture stayed on the panel. 0192: the tick copies only while the GPU is idle (all submitted work done, at most
 12 ticks of waiting) and copies again after any GPU work that followed the last copy. 0193 makes 16 IBs per fence and sweetfb_sync=450 the defaults (no boot-args needed).
+
+### The panel copy per frame (0194, 0195) and the result of 2026-11-21
+
+What the user sees is the panel copy, not what the render server produced: before 0192 the panel got 5.0 copies a second for 9.8 swaps/s, with 0192 (copy only while the GPU is completely idle) 3.6, with 0194 (one snapshot of "the newest fence" two ticks after the latest swap) 3.4:
+a frame's GPU latency (about 150 ms from commit to completion) is longer than the time between swaps (about 100 ms), so every new swap restarted the wait and the copy happened only when the wait was forced (12 ticks), sometimes showing an unfinished frame (the 1.2 % blocks of 0194).
+0195 keeps a queue of the last 8 swaps, each with the newest GPU fence noted two ticks after its swap (CoreAnimation swaps at "scheduled", before the frame's work was submitted), and copies the newest queued swap whose own fence is done (or that waited 30 ticks).
+Series `la` (kernel 0195, no boot-args except the test's): 10 boots, 160 snapshots, **0 with a block, 0 GPU hangs, swaps/s 9.6, panel copies/s 8.2**. 0193 made 16 IBs per fence and the panel-frame copy timing (sweetfb_sync=450) the defaults.
+Still unverified by anything but the user's eyes: horizontal tear lines (whether the copy window of 0187 is right), and whether the whole thing looks smooth.
