@@ -12,6 +12,9 @@
 #import <objc/runtime.h>
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <pthread.h>
 #include <mutex>
 #include <pthread.h>
 #include <string>
@@ -57,6 +60,62 @@ static Timed *callTimer(const char *name) {
  gCallRows[at].name=name;gCallRowCount.store(at+1);return &gCallRows[at].t;
 }
 #define TIMED_CALL(name,expr) ({const uint64_t timedBegan=nowUs();auto timedResult=(expr);callTimer(name)->add(timedBegan);timedResult;})
+
+// ---- the translation worker (2026-11-21) ----
+// Every Metal encoder call used to run the runtime's translation (validation, state tracking, recording the Vulkan commands) to the end on the render server's own thread before it returned: about
+// 85 of the 104 ms of a frame, with seven of the eight cores idle. Now the calls are queued to one worker thread, in order, and replayed there; the caller returns at once. What a call needs is
+// kept alive by the queued block (ARC) and pointer arguments are copied when queued; failures are noted on the command buffer by the worker (it is refused at commit, as before); a commit is queued
+// too (flush, registration, submit) and everything that needs the work done first (status, waits, a CPU access to a resource in flight) drains the command buffer's queue before it looks.
+// /var/local/mtl2-threads starting with 0 turns it off: the calls then run on the caller's thread as before.
+static bool gThreaded=true;
+static std::mutex gWorkLock;
+static std::condition_variable gWorkCv,gDoneCv;
+static std::deque<dispatch_block_t> gWork;
+static uint64_t gWorkEnqueued=0,gWorkDone=0;            // under gWorkLock
+static std::atomic<uint64_t> gWorkBusyUs{0},gWorkOps{0},gWorkPeak{0};
+static std::once_flag gWorkerOnce;
+static thread_local bool tlsIsWorker=false;
+static void workerMain() {
+ tlsIsWorker=true;
+ pthread_setname_np("m2v-translate");
+ for(;;) {
+  dispatch_block_t block=nil;
+  {
+   std::unique_lock<std::mutex> lock(gWorkLock);
+   gWorkCv.wait(lock,[]{return !gWork.empty();});
+   block=gWork.front();gWork.pop_front();
+  }
+  const uint64_t began=nowUs();
+  @autoreleasepool{block();}
+  gWorkBusyUs+=nowUs()-began;gWorkOps++;
+  block=nil;
+  {std::lock_guard<std::mutex> lock(gWorkLock);gWorkDone++;}
+  gDoneCv.notify_all();
+ }
+}
+// Queue a block (copied to the heap); returns its sequence number. With threading off, or on the worker itself, it just runs.
+static uint64_t enqueueWork(dispatch_block_t block) {
+ if(!gThreaded || tlsIsWorker){@autoreleasepool{block();}return 0;}
+ std::call_once(gWorkerOnce,[]{
+  pthread_attr_t attr;pthread_attr_init(&attr);pthread_attr_setstacksize(&attr,4u<<20);
+  pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
+  pthread_t t;pthread_create(&t,&attr,[](void *)->void *{workerMain();return nullptr;},nullptr);
+ });
+ std::unique_lock<std::mutex> lock(gWorkLock);
+ gDoneCv.wait(lock,[]{return gWork.size()<4096;});      // back-pressure: at most a couple of frames queued
+ gWork.push_back([block copy]);
+ const uint64_t seq=++gWorkEnqueued;
+ const uint64_t depth=gWork.size();
+ uint64_t seen=gWorkPeak.load();while(depth>seen && !gWorkPeak.compare_exchange_weak(seen,depth)){}
+ lock.unlock();
+ gWorkCv.notify_one();
+ return seq;
+}
+static void waitWork(uint64_t seq) {
+ if(!seq || tlsIsWorker)return;
+ std::unique_lock<std::mutex> lock(gWorkLock);
+ gDoneCv.wait(lock,[seq]{return gWorkDone>=seq;});
+}
 static Timed gTimePipeline,gTimeLibrary,gTimeFunction,gTimeEncodeToCommit;
 static Timed gTimeWaitScheduled,gTimeWaitCompleted;
 static Timed gTimeResourceWait;
@@ -552,16 +611,22 @@ static void notified(void *context,uint64_t value) {
 @property(nonatomic,strong) dispatch_group_t handlers;
 @property(nonatomic,strong) dispatch_group_t schedulingHandlers;
 @property(nonatomic) BOOL schedulingDelivered;
+@property(atomic) uint64_t lastSeq;
 - (void)refuse:(NSString *)what;
+- (void)defer:(dispatch_block_t)block;     // run on the translation worker, in order
+- (void)drain;                             // wait until everything deferred so far has run
 @end
 @interface NBEncoder : NBObject
 @property(nonatomic) NmbEncoder *handle;
 @property(nonatomic,strong) NBCommandBuffer *commandBuffer;
+@property(atomic) BOOL ended;
+- (void)run:(const char *)what call:(bool(^)(void))call;
 @end
 static void waitForResource(id resource) {
  const uint64_t began=nowUs();
  NSArray *pending;@synchronized(gInFlight){pending=gInFlight.allObjects;}
  for(NBCommandBuffer *commandBuffer in pending) {
+  [commandBuffer drain];      // what the command buffer uses is known only once its queued calls have run
   int dependency=-1;
   if([resource isKindOfClass:[NBBuffer class]])dependency=nmb_command_buffer_uses_buffer(commandBuffer.handle,[(NBBuffer *)resource handle]);
   else if([resource isKindOfClass:[NBTexture class]])dependency=nmb_command_buffer_uses_texture(commandBuffer.handle,[(NBTexture *)resource handle]);
@@ -578,10 +643,28 @@ static void waitForResource(id resource) {
  if(!ok)[_commandBuffer refuse:[NSString stringWithFormat:@"%s: %@",what,lastError()]];
  return ok;
 }
+// Run an encoder call on the translation worker (or here, with threading off); what failed is noted on the command buffer.
+- (void)run:(const char *)what call:(bool(^)(void))call {
+ NBCommandBuffer *commandBuffer=_commandBuffer;
+ [commandBuffer defer:^{
+  const uint64_t began=nowUs();
+  const bool ok=call();
+  callTimer(what)->add(began);
+  if(!ok)[commandBuffer refuse:[NSString stringWithFormat:@"%s: %@",what,lastError()]];
+ }];
+}
 - (void)endEncoding {
- NmbEncoder *handle=_handle;_handle=nullptr;
- if(!handle){[_commandBuffer refuse:@"endEncoding twice"];return;}
- [self check:TIMED_CALL("endEncoding",nmb_encoder_end(handle)) what:"endEncoding"];
+ if(self.ended){[_commandBuffer refuse:@"endEncoding twice"];return;}
+ self.ended=YES;
+ NBCommandBuffer *commandBuffer=_commandBuffer;
+ [commandBuffer defer:^{
+  NmbEncoder *handle=self->_handle;self->_handle=nullptr;
+  if(!handle){[commandBuffer refuse:@"endEncoding without an encoder"];return;}
+  const uint64_t began=nowUs();
+  const bool ok=nmb_encoder_end(handle);
+  callTimer("endEncoding")->add(began);
+  if(!ok)[commandBuffer refuse:[NSString stringWithFormat:@"endEncoding: %@",lastError()]];
+ }];
 }
 - (void)insertDebugSignpost:(NSString *)s {(void)s;}
 - (void)pushDebugGroup:(NSString *)s {(void)s;}
@@ -590,30 +673,32 @@ static void waitForResource(id resource) {
 - (void)buffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset index:(NSUInteger)index stage:(uint32_t)stage {
  if(buffer && ![(id)buffer isKindOfClass:[NBBuffer class]]){[_commandBuffer refuse:@"foreign buffer"];return;}
  if(buffer)[_commandBuffer.resourceOwners addObject:buffer];
- [self check:TIMED_CALL("setBuffer",nmb_encoder_set_buffer(_handle,stage,buffer?[(NBBuffer *)buffer handle]:nullptr,offset,(uint32_t)index)) what:"setBuffer"];
+ [self run:"setBuffer" call:^bool{return nmb_encoder_set_buffer(_handle,stage,buffer?[(NBBuffer *)buffer handle]:nullptr,offset,(uint32_t)index);}];
 }
 - (void)texture:(id<MTLTexture>)texture index:(NSUInteger)index stage:(uint32_t)stage {
  if(texture && ![(id)texture isKindOfClass:[NBTexture class]]){[_commandBuffer refuse:@"foreign texture"];return;}
  if(texture)[_commandBuffer.resourceOwners addObject:texture];
  if(texture && [(NBTexture *)texture surface])[_commandBuffer.surfaces addObject:texture];
- [self check:TIMED_CALL("setTexture",nmb_encoder_set_texture(_handle,stage,texture?[(NBTexture *)texture handle]:nullptr,(uint32_t)index)) what:"setTexture"];
+ [self run:"setTexture" call:^bool{return nmb_encoder_set_texture(_handle,stage,texture?[(NBTexture *)texture handle]:nullptr,(uint32_t)index);}];
 }
 - (void)sampler:(id<MTLSamplerState>)sampler index:(NSUInteger)index stage:(uint32_t)stage {
  if(sampler && ![(id)sampler isKindOfClass:[NBSampler class]]){[_commandBuffer refuse:@"foreign sampler"];return;}
- [self check:TIMED_CALL("setSamplerState",nmb_encoder_set_sampler(_handle,stage,sampler?[(NBSampler *)sampler handle]:nullptr,(uint32_t)index)) what:"setSamplerState"];
+ [self run:"setSamplerState" call:^bool{return nmb_encoder_set_sampler(_handle,stage,sampler?[(NBSampler *)sampler handle]:nullptr,(uint32_t)index);}];
 }
 - (void)bytes:(const void *)bytes length:(NSUInteger)length index:(NSUInteger)index stage:(uint32_t)stage {
- [self check:TIMED_CALL("setBytes",nmb_encoder_set_bytes(_handle,stage,bytes,length,(uint32_t)index)) what:"setBytes"];
+ NSData *copy=[NSData dataWithBytes:bytes length:length];     // the caller's memory is gone when this returns, the call runs later
+ [self run:"setBytes" call:^bool{return nmb_encoder_set_bytes(_handle,stage,copy.bytes,length,(uint32_t)index);}];
 }
 - (void)fence:(id<MTLFence>)fence stages:(uint64_t)stages update:(bool)update {
  if(![(id)fence isKindOfClass:[NBFence class]]){[_commandBuffer refuse:@"foreign fence"];return;}
  NmbFence *handle=[(NBFence *)fence handle];
- [self check:update?nmb_encoder_update_fence(_handle,handle,stages):nmb_encoder_wait_fence(_handle,handle,stages) what:update?"updateFence":"waitForFence"];
+ id keep=fence;     // the block keeps the fence object (and so its handle) alive
+ [self run:update?"updateFence":"waitForFence" call:^bool{(void)keep;return update?nmb_encoder_update_fence(_handle,handle,stages):nmb_encoder_wait_fence(_handle,handle,stages);}];
 }
 - (void)updateFence:(id<MTLFence>)fence {[self fence:fence stages:0 update:true];}
 - (void)waitForFence:(id<MTLFence>)fence {[self fence:fence stages:0 update:false];}
 - (void)offset:(NSUInteger)offset index:(NSUInteger)index stage:(uint32_t)stage {
- [self check:TIMED_CALL("setBufferOffset",nmb_encoder_set_buffer_offset(_handle,stage,offset,(uint32_t)index)) what:"setBufferOffset"];
+ [self run:"setBufferOffset" call:^bool{return nmb_encoder_set_buffer_offset(_handle,stage,offset,(uint32_t)index);}];
 }
 @end
 
@@ -623,7 +708,7 @@ static void waitForResource(id resource) {
 - (MTLDispatchType)dispatchType {return MTLDispatchTypeSerial;}
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)state {
  if(![(id)state isKindOfClass:[NBComputePipeline class]]){[self.commandBuffer refuse:@"foreign compute pipeline"];return;}
- [self check:TIMED_CALL("setComputePipelineState",nmb_compute_set_pipeline(self.handle,[(NBComputePipeline *)state handle])) what:"setComputePipelineState"];
+ [self run:"setComputePipelineState" call:^bool{return nmb_compute_set_pipeline(self.handle,[(NBComputePipeline *)state handle]);}];
 }
 - (void)setBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:0];}
 - (void)setBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i {[self offset:o index:i stage:0];}
@@ -637,12 +722,12 @@ static void waitForResource(id resource) {
 }
 - (void)setSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i {[self sampler:s index:i stage:0];}
 - (void)setThreadgroupMemoryLength:(NSUInteger)n atIndex:(NSUInteger)i {
- [self check:TIMED_CALL("setThreadgroupMemoryLength",nmb_compute_set_threadgroup_memory(self.handle,(uint32_t)n,(uint32_t)i)) what:"setThreadgroupMemoryLength"];
+ [self run:"setThreadgroupMemoryLength" call:^bool{return nmb_compute_set_threadgroup_memory(self.handle,(uint32_t)n,(uint32_t)i);}];
 }
 - (void)dispatch:(MTLSize)size group:(MTLSize)group threads:(bool)threads {
  gDispatches++;self.commandBuffer->encodedWork.dispatches++;
  const uint64_t s[3]={size.width,size.height,size.depth},g[3]={group.width,group.height,group.depth};
- [self check:TIMED_CALL("dispatch",nmb_compute_dispatch(self.handle,s,g,threads)) what:"dispatch"];
+ [self run:"dispatch" call:^bool{return nmb_compute_dispatch(self.handle,s,g,threads);}];
 }
 - (void)dispatchThreads:(MTLSize)t threadsPerThreadgroup:(MTLSize)g {[self dispatch:t group:g threads:true];}
 - (void)dispatchThreadgroups:(MTLSize)t threadsPerThreadgroup:(MTLSize)g {[self dispatch:t group:g threads:false];}
@@ -655,7 +740,7 @@ static void waitForResource(id resource) {
 @implementation NBRenderEncoder
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)state {
  if(![(id)state isKindOfClass:[NBRenderPipeline class]]){[self.commandBuffer refuse:@"foreign render pipeline"];return;}
- [self check:TIMED_CALL("setRenderPipelineState",nmb_render_set_pipeline(self.handle,[(NBRenderPipeline *)state handle])) what:"setRenderPipelineState"];
+ [self run:"setRenderPipelineState" call:^bool{return nmb_render_set_pipeline(self.handle,[(NBRenderPipeline *)state handle]);}];
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:1];}
 - (void)setFragmentBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:2];}
@@ -678,30 +763,30 @@ static void waitForResource(id resource) {
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i {[self sampler:s index:i stage:2];}
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)state {
  if(state && ![(id)state isKindOfClass:[NBDepthStencil class]]){[self.commandBuffer refuse:@"foreign depth/stencil state"];return;}
- [self check:TIMED_CALL("setDepthStencilState",nmb_render_set_depth_stencil(self.handle,state?[(NBDepthStencil *)state handle]:nullptr)) what:"setDepthStencilState"];
+ [self run:"setDepthStencilState" call:^bool{return nmb_render_set_depth_stencil(self.handle,state?[(NBDepthStencil *)state handle]:nullptr);}];
 }
 - (void)setViewport:(MTLViewport)v {
  const double values[6]={v.originX,v.originY,v.width,v.height,v.znear,v.zfar};
- [self check:TIMED_CALL("setViewport",nmb_render_set_viewport(self.handle,values)) what:"setViewport"];
+ [self run:"setViewport" call:^bool{return nmb_render_set_viewport(self.handle,values);}];
 }
 - (void)setScissorRect:(MTLScissorRect)r {
  const uint64_t values[4]={r.x,r.y,r.width,r.height};
- [self check:TIMED_CALL("setScissorRect",nmb_render_set_scissor(self.handle,values)) what:"setScissorRect"];
+ [self run:"setScissorRect" call:^bool{return nmb_render_set_scissor(self.handle,values);}];
 }
 // The runtime takes cull mode, winding and fill mode together; this encoder keeps Metal's defaults until each is set.
 - (void)raster {
  NSNumber *cull=objc_getAssociatedObject(self,"cull"),*winding=objc_getAssociatedObject(self,"winding"),*fill=objc_getAssociatedObject(self,"fill");
- [self check:TIMED_CALL("raster state",nmb_render_set_raster(self.handle,cull.unsignedLongLongValue,winding.unsignedLongLongValue,fill.unsignedLongLongValue)) what:"raster state"];
+ [self run:"raster state" call:^bool{return nmb_render_set_raster(self.handle,cull.unsignedLongLongValue,winding.unsignedLongLongValue,fill.unsignedLongLongValue);}];
 }
 - (void)setCullMode:(MTLCullMode)m {objc_setAssociatedObject(self,"cull",@(m),OBJC_ASSOCIATION_RETAIN);[self raster];}
 - (void)setFrontFacingWinding:(MTLWinding)w {objc_setAssociatedObject(self,"winding",@(w),OBJC_ASSOCIATION_RETAIN);[self raster];}
 - (void)setTriangleFillMode:(MTLTriangleFillMode)f {objc_setAssociatedObject(self,"fill",@(f),OBJC_ASSOCIATION_RETAIN);[self raster];}
 - (void)setDepthBias:(float)bias slopeScale:(float)slope clamp:(float)clamp {
- [self check:TIMED_CALL("setDepthBias",nmb_render_set_depth_bias(self.handle,bias,slope,clamp)) what:"setDepthBias"];
+ [self run:"setDepthBias" call:^bool{return nmb_render_set_depth_bias(self.handle,bias,slope,clamp);}];
 }
-- (void)setLineWidth:(float)width {[self check:TIMED_CALL("setLineWidth",nmb_render_set_line_width(self.handle,width)) what:"setLineWidth"];}
+- (void)setLineWidth:(float)width {[self run:"setLineWidth" call:^bool{return nmb_render_set_line_width(self.handle,width);}];}
 - (void)setVisibilityResultMode:(MTLVisibilityResultMode)mode offset:(NSUInteger)offset {
- [self check:TIMED_CALL("setVisibilityResultMode",nmb_render_set_visibility_mode(self.handle,mode,offset)) what:"setVisibilityResultMode"];
+ [self run:"setVisibilityResultMode" call:^bool{return nmb_render_set_visibility_mode(self.handle,mode,offset);}];
 }
 - (void)setFragmentTexture:(id<MTLTexture>)t atTextureIndex:(NSUInteger)ti samplerState:(id<MTLSamplerState>)s atSamplerIndex:(NSUInteger)si {
  [self texture:t index:ti stage:2];[self sampler:s index:si stage:2];
@@ -714,16 +799,16 @@ static void waitForResource(id resource) {
 - (void)setTileBytes:(const void *)p length:(NSUInteger)n atIndex:(NSUInteger)i {(void)p;(void)n;(void)i;[self.commandBuffer refuse:@"tile shaders are not supported"];}
 - (void)dispatchThreadsPerTile:(MTLSize)size {(void)size;[self.commandBuffer refuse:@"tile shaders are not supported"];}
 - (void)dispatchThreadsPerTile:(MTLSize)size inRegion:(MTLRegion)region {(void)size;(void)region;[self.commandBuffer refuse:@"tile shaders are not supported"];}
-- (void)setStencilReferenceValue:(uint32_t)v {[self check:TIMED_CALL("setStencilReferenceValue",nmb_render_set_stencil_reference(self.handle,v,v)) what:"setStencilReferenceValue"];}
+- (void)setStencilReferenceValue:(uint32_t)v {[self run:"setStencilReferenceValue" call:^bool{return nmb_render_set_stencil_reference(self.handle,v,v);}];}
 - (void)setStencilFrontReferenceValue:(uint32_t)f backReferenceValue:(uint32_t)b {
- [self check:TIMED_CALL("setStencilReferenceValues",nmb_render_set_stencil_reference(self.handle,f,b)) what:"setStencilReferenceValues"];
+ [self run:"setStencilReferenceValues" call:^bool{return nmb_render_set_stencil_reference(self.handle,f,b);}];
 }
 - (void)setBlendColorRed:(float)r green:(float)g blue:(float)b alpha:(float)a {
- const float c[4]={r,g,b,a};[self check:TIMED_CALL("setBlendColor",nmb_render_set_blend_color(self.handle,c)) what:"setBlendColor"];
+ const float c[4]={r,g,b,a};[self run:"setBlendColor" call:^bool{return nmb_render_set_blend_color(self.handle,c);}];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i baseInstance:(NSUInteger)b {
  gDraws++;self.commandBuffer->encodedWork.draws++;
- [self check:TIMED_CALL("drawPrimitives",nmb_render_draw(self.handle,t,(uint32_t)s,(uint32_t)n,(uint32_t)i,(uint32_t)b)) what:"drawPrimitives"];
+ [self run:"drawPrimitives" call:^bool{return nmb_render_draw(self.handle,t,(uint32_t)s,(uint32_t)n,(uint32_t)i,(uint32_t)b);}];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i {
  [self drawPrimitives:t vertexStart:s vertexCount:n instanceCount:i baseInstance:0];
@@ -736,7 +821,7 @@ static void waitForResource(id resource) {
  if(![(id)b isKindOfClass:[NBBuffer class]]){[self.commandBuffer refuse:@"foreign index buffer"];return;}
  [self.commandBuffer.resourceOwners addObject:b];
  gDraws++;self.commandBuffer->encodedWork.draws++;
- [self check:TIMED_CALL("drawIndexedPrimitives",nmb_render_draw_indexed(self.handle,t,(uint32_t)n,k,[(NBBuffer *)b handle],o,(uint32_t)i,(int32_t)v,(uint32_t)bi)) what:"drawIndexedPrimitives"];
+ [self run:"drawIndexedPrimitives" call:^bool{return nmb_render_draw_indexed(self.handle,t,(uint32_t)n,k,[(NBBuffer *)b handle],o,(uint32_t)i,(int32_t)v,(uint32_t)bi);}];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexCount:(NSUInteger)n indexType:(MTLIndexType)k indexBuffer:(id<MTLBuffer>)b indexBufferOffset:(NSUInteger)o
                 instanceCount:(NSUInteger)i {
@@ -772,17 +857,17 @@ static void waitForResource(id resource) {
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)s sourceOffset:(NSUInteger)so toBuffer:(id<MTLBuffer>)d destinationOffset:(NSUInteger)dO size:(NSUInteger)n {
  if(![self buffers:NB_OBJECTS(s,d) count:2])return;
- [self check:TIMED_CALL("copyFromBuffer:toBuffer:",nmb_blit_copy_buffer(self.handle,[(NBBuffer *)s handle],so,[(NBBuffer *)d handle],dO,n)) what:"copyFromBuffer:toBuffer:"];
+ [self run:"copyFromBuffer:toBuffer:" call:^bool{return nmb_blit_copy_buffer(self.handle,[(NBBuffer *)s handle],so,[(NBBuffer *)d handle],dO,n);}];
 }
 - (void)fillBuffer:(id<MTLBuffer>)b range:(NSRange)r value:(uint8_t)v {
  if(![self buffers:NB_OBJECTS(b) count:1])return;
- [self check:TIMED_CALL("fillBuffer",nmb_blit_fill_buffer(self.handle,[(NBBuffer *)b handle],r.location,r.location+r.length,v)) what:"fillBuffer"];
+ [self run:"fillBuffer" call:^bool{return nmb_blit_fill_buffer(self.handle,[(NBBuffer *)b handle],r.location,r.location+r.length,v);}];
 }
 - (void)copyFromTexture:(id<MTLTexture>)s sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)z
               toTexture:(id<MTLTexture>)d destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dO {
  if(![self textures:NB_OBJECTS(s,d) count:2])return;
  const uint64_t a[3]={so.x,so.y,so.z},size[3]={z.width,z.height,z.depth},b[3]={dO.x,dO.y,dO.z};
- [self check:TIMED_CALL("copyFromTexture:toTexture:",nmb_blit_copy_texture(self.handle,[(NBTexture *)s handle],ss,sl,a,size,[(NBTexture *)d handle],ds,dl,b)) what:"copyFromTexture:toTexture:"];
+ [self run:"copyFromTexture:toTexture:" call:^bool{return nmb_blit_copy_texture(self.handle,[(NBTexture *)s handle],ss,sl,a,size,[(NBTexture *)d handle],ds,dl,b);}];
 }
 - (void)copyFromTexture:(id<MTLTexture>)s toTexture:(id<MTLTexture>)d {
  if(![self textures:NB_OBJECTS(s,d) count:2])return;
@@ -798,17 +883,17 @@ static void waitForResource(id resource) {
      destinationOrigin:(MTLOrigin)dO {
  if(![self buffers:NB_OBJECTS(s) count:1] || ![self textures:NB_OBJECTS(d) count:1])return;
  const uint64_t size[3]={z.width,z.height,z.depth},b[3]={dO.x,dO.y,dO.z};
- [self check:TIMED_CALL("copyFromBuffer:toTexture:",nmb_blit_buffer_to_texture(self.handle,[(NBBuffer *)s handle],o,row,image,size,[(NBTexture *)d handle],slice,level,b)) what:"copyFromBuffer:toTexture:"];
+ [self run:"copyFromBuffer:toTexture:" call:^bool{return nmb_blit_buffer_to_texture(self.handle,[(NBBuffer *)s handle],o,row,image,size,[(NBTexture *)d handle],slice,level,b);}];
 }
 - (void)copyFromTexture:(id<MTLTexture>)s sourceSlice:(NSUInteger)slice sourceLevel:(NSUInteger)level sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)z
                toBuffer:(id<MTLBuffer>)d destinationOffset:(NSUInteger)o destinationBytesPerRow:(NSUInteger)row destinationBytesPerImage:(NSUInteger)image {
  if(![self textures:NB_OBJECTS(s) count:1] || ![self buffers:NB_OBJECTS(d) count:1])return;
  const uint64_t a[3]={so.x,so.y,so.z},size[3]={z.width,z.height,z.depth};
- [self check:TIMED_CALL("copyFromTexture:toBuffer:",nmb_blit_texture_to_buffer(self.handle,[(NBTexture *)s handle],slice,level,a,size,[(NBBuffer *)d handle],o,row,image)) what:"copyFromTexture:toBuffer:"];
+ [self run:"copyFromTexture:toBuffer:" call:^bool{return nmb_blit_texture_to_buffer(self.handle,[(NBTexture *)s handle],slice,level,a,size,[(NBBuffer *)d handle],o,row,image);}];
 }
 - (void)generateMipmapsForTexture:(id<MTLTexture>)t {
  if(![self textures:NB_OBJECTS(t) count:1])return;
- [self check:TIMED_CALL("generateMipmapsForTexture",nmb_blit_generate_mipmaps(self.handle,[(NBTexture *)t handle])) what:"generateMipmapsForTexture"];
+ [self run:"generateMipmapsForTexture" call:^bool{return nmb_blit_generate_mipmaps(self.handle,[(NBTexture *)t handle]);}];
 }
 - (void)synchronizeResource:(id<MTLResource>)r {(void)r;}
 @end
@@ -829,10 +914,18 @@ static void scheduled(void *context);
 - (uint64_t)protectionOptions {return 0;}
 - (void)setProtectionOptions:(uint64_t)options {if(options)[self refuse:[NSString stringWithFormat:@"protection options 0x%llx",options]];}
 - (void)refuse:(NSString *)what {
- if(!self.encodeFailure){self.encodeFailure=what;NBLOG(@"native-metal: command buffer refused: %@",what);}
+ @synchronized(self){
+  if(!self.encodeFailure){self.encodeFailure=what;NBLOG(@"native-metal: command buffer refused: %@",what);}
+ }
 }
+- (void)defer:(dispatch_block_t)block {
+ const uint64_t seq=enqueueWork(block);
+ if(seq)self.lastSeq=seq;
+}
+- (void)drain {waitWork(self.lastSeq);}
 - (MTLCommandBufferStatus)status {
  if(self.failedLocally)return MTLCommandBufferStatusError;
+ if(self.committed)[self drain];
  return (MTLCommandBufferStatus)nmb_command_buffer_status(_handle);
 }
 - (NSError *)error {
@@ -850,15 +943,23 @@ static void scheduled(void *context);
 - (CFTimeInterval)kernelStartTime {return 0;}
 - (CFTimeInterval)kernelEndTime {return 0;}
 - (BOOL)commitAndWaitUntilSubmitted {[(id<MTLCommandBuffer>)self commit];[self waitUntilScheduled];return !self.failedLocally;}
-- (CFTimeInterval)GPUStartTime {return nmb_command_buffer_gpu_time(_handle,false);}
-- (CFTimeInterval)GPUEndTime {return nmb_command_buffer_gpu_time(_handle,true);}
-- (id)encoder:(NBEncoder *)encoder handle:(NmbEncoder *)handle what:(NSString *)what {
+- (CFTimeInterval)GPUStartTime {[self drain];return nmb_command_buffer_gpu_time(_handle,false);}
+- (CFTimeInterval)GPUEndTime {[self drain];return nmb_command_buffer_gpu_time(_handle,true);}
+// The encoder object exists at once; its runtime handle is made on the worker, in order after the previous encoder's end (a failure refuses the command buffer there).
+- (id)encoder:(NBEncoder *)encoder what:(NSString *)what create:(NmbEncoder *(^)(void))create {
  if(self.committed){[self refuse:[what stringByAppendingString:@" after commit"]];return nil;}
- if(!handle){[self refuse:[NSString stringWithFormat:@"%@: %@",what,lastError()]];return nil;}
- encoder.handle=handle;encoder.commandBuffer=self;return encoder;
+ encoder.commandBuffer=self;
+ [self defer:^{
+  const uint64_t began=nowUs();
+  NmbEncoder *handle=create();
+  callTimer("newEncoder")->add(began);
+  if(!handle)[self refuse:[NSString stringWithFormat:@"%@: %@",what,lastError()]];
+  encoder.handle=handle;
+ }];
+ return encoder;
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoder {
- return [self encoder:[NBComputeEncoder new] handle:self.committed?nullptr:nmb_compute_encoder_new(_handle) what:@"computeCommandEncoder"];
+ return [self encoder:[NBComputeEncoder new] what:@"computeCommandEncoder" create:^NmbEncoder *{return nmb_compute_encoder_new(self->_handle);}];
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDispatchType:(MTLDispatchType)type {
  if(type!=MTLDispatchTypeSerial){[self refuse:@"concurrent compute dispatch"];return nil;}
@@ -866,7 +967,7 @@ static void scheduled(void *context);
 }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoder {
  gBlits++;encodedWork.blits++;
- return [self encoder:[NBBlitEncoder new] handle:self.committed?nullptr:nmb_blit_encoder_new(_handle) what:@"blitCommandEncoder"];
+ return [self encoder:[NBBlitEncoder new] what:@"blitCommandEncoder" create:^NmbEncoder *{return nmb_blit_encoder_new(self->_handle);}];
 }
 - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)d {
  NmbRenderPassDescriptor pass={};
@@ -900,7 +1001,8 @@ static void scheduled(void *context);
   [_resourceOwners addObject:d.visibilityResultBuffer];
   pass.visibility=[(NBBuffer *)d.visibilityResultBuffer handle];
  }
- return [self encoder:[NBRenderEncoder new] handle:self.committed?nullptr:TIMED_CALL("newRenderEncoder",nmb_render_encoder_new(_handle,&pass)) what:@"renderCommandEncoder"];
+ const NmbRenderPassDescriptor passCopy=pass;     // the pointers inside name textures the command buffer's resource owners hold
+ return [self encoder:[NBRenderEncoder new] what:@"renderCommandEncoder" create:^NmbEncoder *{return nmb_render_encoder_new(self->_handle,&passCopy);}];
 }
 - (void)addScheduledHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_scheduledHandlers addObject:[block copy]];}}
 - (void)addCompletedHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_completedHandlers addObject:[block copy]];}}
@@ -909,8 +1011,12 @@ static void scheduled(void *context);
  if(![(id)event isKindOfClass:[NBEvent class]]){[self refuse:@"foreign event"];return;}
  if(self.committed){[self refuse:@"event encoded after commit"];return;}
  NmbEvent *handle=[(NBEvent *)event handle];
- if(!(signal?nmb_command_buffer_signal_event(_handle,handle,value):nmb_command_buffer_wait_event(_handle,handle,value)))
-  [self refuse:[NSString stringWithFormat:@"%s: %@",signal?"encodeSignalEvent":"encodeWaitForEvent",lastError()]];
+ id keep=event;     // the block keeps the event object (and so its handle) alive
+ [self defer:^{
+  (void)keep;
+  if(!(signal?nmb_command_buffer_signal_event(self->_handle,handle,value):nmb_command_buffer_wait_event(self->_handle,handle,value)))
+   [self refuse:[NSString stringWithFormat:@"%s: %@",signal?"encodeSignalEvent":"encodeWaitForEvent",lastError()]];
+ }];
 }
 - (void)encodeSignalEvent:(id<MTLEvent>)event value:(uint64_t)value {[self event:event value:value signal:true];}
 - (void)encodeWaitForEvent:(id<MTLEvent>)event value:(uint64_t)value {[self event:event value:value signal:false];}
@@ -969,6 +1075,10 @@ static void scheduled(void *context);
  dispatch_group_enter(_handlers);
  dispatch_group_enter(_schedulingHandlers);
  @synchronized(gInFlight){[gInFlight addObject:self];}
+ // The rest runs on the translation worker after every call queued before it (the flush, the callbacks' registration and the submit).
+ [self defer:^{[self commitOnWorker];}];
+}
+- (void)commitOnWorker {
  if(!self.encodeFailure) {
   TIMED_CALL("flushAll",({flushSurfaces(_surfaces);flushNoCopy(_resourceOwners);true;}));
   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
@@ -983,6 +1093,7 @@ static void scheduled(void *context);
 }
 - (void)waitUntilCompleted {
  if(!self.committed)return;
+ [self drain];
  const uint64_t began=nowUs();
  if(!self.failedLocally)nmb_command_buffer_wait(_handle,0);
  dispatch_group_wait(_handlers,DISPATCH_TIME_FOREVER);
@@ -990,6 +1101,7 @@ static void scheduled(void *context);
 }
 - (void)waitUntilScheduled {
  if(!self.committed)return;
+ [self drain];
  const uint64_t began=nowUs();
  if(!self.failedLocally && !nmb_command_buffer_wait_scheduled(_handle)){
   NBLOG(@"native-metal: waitUntilScheduled refused: %@",lastError());return;
@@ -1609,6 +1721,7 @@ static void installAnswers(Class cls) {
 extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint64_t registryID,void (*missing)(const char *,const char *)) {
  if(gDeviceObject)return gDeviceObject;
  gMissing=missing;gInFlight=[NSMutableSet set];
+ if(FILE *tf=fopen("/var/local/mtl2-threads","r")){const int c=fgetc(tf);fclose(tf);if(c=='0')gThreaded=false;}    // the translation worker: on unless that file starts with 0
  gDevice=nmb_device_open(loader,cache);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return nil;}
  if(cache){gJournalPath=std::string(cache)+"/pipelines.log";gJournalBegan=nowUs();}
@@ -1779,6 +1892,7 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
  row("J nocopy cache n=%llu bytes=%llu us=%llu max=%llu",(unsigned long long)gTimeNoCopyFlush.count.load(),
   (unsigned long long)gNoCopyFlushBytes.load(),(unsigned long long)gTimeNoCopyFlush.total.load(),(unsigned long long)gTimeNoCopyFlush.slowest.load());
  row("J device answers cached hits=%llu misses=%llu",(unsigned long long)gAnswerHits.load(),(unsigned long long)gAnswerMisses.load());
+ row("J translate worker %s ops=%llu busy=%llums peak queue=%llu",gThreaded?"on":"off",(unsigned long long)gWorkOps.load(),(unsigned long long)(gWorkBusyUs.load()/1000),(unsigned long long)gWorkPeak.load());
  for(int i=0,n=gCallRowCount.load();i<n;i++)if(gCallRows[i].t.count.load()>0)
   row("Z call %s n=%llu us=%llu max=%llu",gCallRows[i].name,(unsigned long long)gCallRows[i].t.count.load(),(unsigned long long)gCallRows[i].t.total.load(),(unsigned long long)gCallRows[i].t.slowest.load());
  // The runtime's VkPipeline makings (the creation log, METAL2VULKAN_LOG_PIPELINES; they happen at draws, not at the state's creation) and
