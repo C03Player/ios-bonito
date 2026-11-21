@@ -10,7 +10,7 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  extern int hz;
-@@ -2527,3 +2529,31 @@
+@@ -2527,3 +2529,33 @@
  	}
  }
  #endif /* ARM64_BOARD_CONFIG_SWEET */
@@ -20,6 +20,8 @@ diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
 + * SMP), but cores 0-5 are Kryo 360 Silver (Cortex-A55, 1708 MHz, 853 M dependent adds/s measured) and 6-7 Gold (A75, 1996 MHz, 1995 M/s): a heavy thread ran on a silver core three times out of
 + * four (a profile of the render server's hot thread: 80 % of its samples on cores 0-5). The Metal plugin binds its translation worker to cpu 6 and the render server's busiest caller to cpu 7.
 + */
++extern processor_t thread_bind(processor_t processor);       /* osfmk/kern/sched_prim.h: declared for the kernel proper only */
++
 +static int
 +sweet_bind_cpu_sysctl SYSCTL_HANDLER_ARGS
 +{
