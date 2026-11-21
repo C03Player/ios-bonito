@@ -70,6 +70,10 @@ static Timed *callTimer(const char *name) {
 // too (flush, registration, submit) and everything that needs the work done first (status, waits, a CPU access to a resource in flight) drains the command buffer's queue before it looks.
 // /var/local/mtl2-threads starting with 0 turns it off: the calls then run on the caller's thread as before.
 static bool gThreaded=true;
+// Early release (patch 0200): waitUntilScheduled returns at once instead of waiting for the translation worker to translate and submit the whole frame (the render thread was blocked there 71 % of the
+// time). The kernel counts the commits not yet submitted (kern.sweet_gpu_pending) so the panel copy does not use a swap's fence while one is pending. /var/local/mtl2-early starting with 0 turns it off.
+static bool gEarly=true;
+static void pendingAdd(int delta) {sysctlbyname("kern.sweet_gpu_pending",nullptr,nullptr,&delta,sizeof delta);}
 static std::mutex gWorkLock;
 static std::condition_variable gWorkCv,gDoneCv;
 static std::deque<dispatch_block_t> gWork;
@@ -1092,9 +1096,11 @@ static void scheduled(void *context);
  dispatch_group_enter(_schedulingHandlers);
  @synchronized(gInFlight){[gInFlight addObject:self];}
  // The rest runs on the translation worker after every call queued before it (the flush, the callbacks' registration and the submit).
+ if(gEarly&&gThreaded)pendingAdd(1);
  [self defer:^{[self commitOnWorker];}];
 }
 - (void)commitOnWorker {
+ struct PendingGuard {~PendingGuard(){if(gEarly&&gThreaded)pendingAdd(-1);}} pendingGuard;
  if(!self.encodeFailure) {
   TIMED_CALL("flushAll",({flushSurfaces(_surfaces);flushNoCopy(_resourceOwners);true;}));
   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
@@ -1117,6 +1123,7 @@ static void scheduled(void *context);
 }
 - (void)waitUntilScheduled {
  if(!self.committed)return;
+ if(gEarly&&gThreaded)return;     // patch 0200: the scheduling handlers still run when the worker has submitted
  [self drain];
  const uint64_t began=nowUs();
  if(!self.failedLocally && !nmb_command_buffer_wait_scheduled(_handle)){
@@ -1738,6 +1745,7 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
  if(gDeviceObject)return gDeviceObject;
  gMissing=missing;gInFlight=[NSMutableSet set];
  if(FILE *bf=fopen("/var/local/mtl2-bind","r")){const int c=fgetc(bf);fclose(bf);if(c=='0')gBind=false;}      // cpu binding: on unless that file starts with 0
+ if(FILE *ef=fopen("/var/local/mtl2-early","r")){const int c=fgetc(ef);fclose(ef);if(c=='0')gEarly=false;}      // early release of waitUntilScheduled: on unless that file starts with 0
  if(FILE *tf=fopen("/var/local/mtl2-threads","r")){const int c=fgetc(tf);fclose(tf);if(c=='0')gThreaded=false;}    // the translation worker: on unless that file starts with 0
  gDevice=nmb_device_open(loader,cache);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return nil;}
