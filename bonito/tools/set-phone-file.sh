@@ -5,8 +5,13 @@
 cd "$(dirname "$0")/../.." || exit 2
 KR=$1; LOCAL=$2; REMOTE=$3
 TAG=spf$$
-bonito/tools/ci-cycle.sh "$KR" "fl_$TAG" "sweetnoinit=1 sweetreboot=150" 400 "sweetfb_sync" > "/tmp/cycle-fl_$TAG.log" 2>&1
-grep -a -q "VFS_SYNC(root) = 0" "logs/fl_$TAG.txt" || { echo "journal flush failed"; exit 2; }
+# a boot now and then dies about 30 s in (log cut off mid-line): try up to 3 times
+OK=0
+for try in 1 2 3; do
+	bonito/tools/ci-cycle.sh "$KR" "fl_$TAG" "sweetnoinit=1 sweetreboot=150" 400 "sweetfb_sync" > "/tmp/cycle-fl_$TAG.log" 2>&1
+	grep -a -q "VFS_SYNC(root) = 0" "logs/fl_$TAG.txt" && { OK=1; break; }
+done
+[ $OK = 1 ] || { echo "journal flush failed"; exit 2; }
 rm -f "logs/fl_$TAG.txt" "logs/fl_$TAG.png" "bonito/shim/out/fl_$TAG.img" "work/fl_$TAG.payload"
 [ "$(fastboot getvar product 2>&1 | grep -a product | head -1 | awk '{print $2}')" = bonito ] || { echo "not bonito"; exit 3; }
 fastboot set_active a >/dev/null 2>&1; fastboot reboot >/dev/null 2>&1
