@@ -1,0 +1,61 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1528,7 +1528,7 @@
+ bonito_gpu_submit_n(const uint64_t *ib_iova, const uint32_t *ib_dwords, unsigned n, uint32_t timeout_ms)
+ {
+ 	uint64_t fva = G6_GVA_POOL + G6_OFF_SCRATCH + 0x10;
+-	uint32_t fence, got = 0, dw[16 * 8 + 5];
++	uint32_t fence, got = 0, dw[16 * 13 + 5];
+ 	unsigned cnt = 0;
+ 	int rc;
+ 
+@@ -1561,6 +1561,19 @@
+ 		dw[cnt++] = (uint32_t)ib_iova[i];
+ 		dw[cnt++] = (uint32_t)(ib_iova[i] >> 32);
+ 		dw[cnt++] = ib_dwords[i];
++		if (i + 1 < n) {
++			/*
++			 * Patch 0188: flush the GPU's caches before the next IB's CCU invalidate. Patch 0179 put up to 16 IBs behind one fence flush: the next IB's
++			 * PC_CCU_INVALIDATE_COLOR then threw away the color lines the previous IB had left dirty in the CCU (its last tiles), so those tiles of the frame
++			 * never reached memory and the panel showed the older frame there (tile-shaped blocks at multiples of 32 pixels, in a screen that was at rest).
++			 * The flush is a CACHE_FLUSH_TS into a spare scratch word: the fence word is written only by the batch's last packet.
++			 */
++			dw[cnt++] = g6_pkt7(0x46, 4);
++			dw[cnt++] = 0x04;                       /* CACHE_FLUSH_TS */
++			dw[cnt++] = (uint32_t)(fva + 0xf0);     /* scratch + 0x100 */
++			dw[cnt++] = (uint32_t)((fva + 0xf0) >> 32);
++			dw[cnt++] = (uint32_t)i + 1;
++		}
+ 	}
+ 	dw[cnt++] = g6_pkt7(0x46, 4);
+ 	dw[cnt++] = 0x04;                                       /* CACHE_FLUSH_TS */
+@@ -1681,7 +1694,7 @@
+ bonito_gpu_submit_async(const uint64_t *ib_iova, const uint32_t *ib_dwords, unsigned n, uint32_t *fence_out)
+ {
+ 	uint64_t fva = G6_GVA_POOL + G6_OFF_SCRATCH + 0x10;
+-	uint32_t dw[16 * 8 + 5], fence, w, first;
++	uint32_t dw[16 * 13 + 5], fence, w, first;
+ 	unsigned cnt = 0;
+ 
+ 	if (!g6_ready || n == 0 || n > 16) {
+@@ -1706,6 +1719,19 @@
+ 		dw[cnt++] = (uint32_t)ib_iova[i];
+ 		dw[cnt++] = (uint32_t)(ib_iova[i] >> 32);
+ 		dw[cnt++] = ib_dwords[i];
++		if (i + 1 < n) {
++			/*
++			 * Patch 0188: flush the GPU's caches before the next IB's CCU invalidate. Patch 0179 put up to 16 IBs behind one fence flush: the next IB's
++			 * PC_CCU_INVALIDATE_COLOR then threw away the color lines the previous IB had left dirty in the CCU (its last tiles), so those tiles of the frame
++			 * never reached memory and the panel showed the older frame there (tile-shaped blocks at multiples of 32 pixels, in a screen that was at rest).
++			 * The flush is a CACHE_FLUSH_TS into a spare scratch word: the fence word is written only by the batch's last packet.
++			 */
++			dw[cnt++] = g6_pkt7(0x46, 4);
++			dw[cnt++] = 0x04;                       /* CACHE_FLUSH_TS */
++			dw[cnt++] = (uint32_t)(fva + 0xf0);     /* scratch + 0x100 */
++			dw[cnt++] = (uint32_t)((fva + 0xf0) >> 32);
++			dw[cnt++] = (uint32_t)i + 1;
++		}
+ 	}
+ 	dw[cnt++] = g6_pkt7(0x46, 4);
+ 	dw[cnt++] = 0x04;                                       /* CACHE_FLUSH_TS */
