@@ -1,0 +1,18 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -435,6 +435,14 @@
+ 		}
+ 	}
+ 	IOLockUnlock(fb->fLock);
++	if (rec == NULL && sweet_fb_kick && (uint64_t)count - sweet_fb_last_copy >= 6) {
++		/*
++		 * Patch 0185: with autorefresh off the panel shows only what a kick sends. Memory written behind this driver's back (the kernel console while iOS boots, the
++		 * snapshot/overlay code) would never appear: one transfer every 6 ticks (10 Hz) while no copy has kicked, which also proves the trigger works (the boot log scrolls).
++		 */
++		sweet_fb_kick_now();
++		sweet_fb_last_copy = (uint64_t)count;
++	}
+ 	if (rec != NULL) {
+ 		uint64_t t0 = mach_absolute_time();
+ 		fb->present(rec);
