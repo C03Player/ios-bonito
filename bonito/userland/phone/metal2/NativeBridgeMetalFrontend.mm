@@ -1563,9 +1563,25 @@ static char sweetMemoryOwnerKey;
 static std::unordered_map<SEL,uint64_t> gAnswers;
 static NSUInteger countAnswer(id,SEL cmd) {return (NSUInteger)gAnswers.at(cmd);}
 static BOOL flagAnswer(id,SEL cmd) {return gAnswers.at(cmd)!=0;}
+// The answers never change while the device lives, and the render server asks the same questions over and over (supportsFamily:, pixel format and sample count queries, many a frame):
+// in a profile of the render server (2026-11-21) the runtime's format_answers / families audit / FormatAnswers::clone were about a tenth of its CPU time. Answered once per (question, argument).
+struct AnswerKey {SEL cmd;NSUInteger arg;bool operator==(const AnswerKey &o) const {return cmd==o.cmd && arg==o.arg;}};
+struct AnswerKeyHash {size_t operator()(const AnswerKey &k) const {return std::hash<const void *>()((const void *)k.cmd)*1000003u ^ std::hash<NSUInteger>()(k.arg);}};
+static std::unordered_map<AnswerKey,uint64_t,AnswerKeyHash> gAnswerCache;
+static std::mutex gAnswerLock;
+static std::atomic<uint64_t> gAnswerHits,gAnswerMisses;
 static uint64_t askAnswer(SEL cmd,NSUInteger arg) {
+ const AnswerKey key{cmd,arg};
+ {
+  std::lock_guard<std::mutex> lock(gAnswerLock);
+  auto it=gAnswerCache.find(key);
+  if(it!=gAnswerCache.end()){gAnswerHits++;return it->second;}
+ }
+ gAnswerMisses++;
  uint64_t value=0;
- if(!nmb_device_answer(gDevice,sel_getName(cmd),arg,&value)){NBLOG(@"native-metal: %s(%lu): %@",sel_getName(cmd),(unsigned long)arg,lastError());return 0;}
+ if(!nmb_device_answer(gDevice,sel_getName(cmd),arg,&value)){NBLOG(@"native-metal: %s(%lu): %@",sel_getName(cmd),(unsigned long)arg,lastError());value=0;}
+ std::lock_guard<std::mutex> lock(gAnswerLock);
+ gAnswerCache[key]=value;     // a refusal is constant too (and is logged once)
  return value;
 }
 static NSUInteger countArgAnswer(id,SEL cmd,NSUInteger arg) {return (NSUInteger)askAnswer(cmd,arg);}
@@ -1762,6 +1778,7 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
   (unsigned long long)gTimeSurfaceFlush.total.load(),(unsigned long long)gTimeSurfaceFlush.slowest.load());
  row("J nocopy cache n=%llu bytes=%llu us=%llu max=%llu",(unsigned long long)gTimeNoCopyFlush.count.load(),
   (unsigned long long)gNoCopyFlushBytes.load(),(unsigned long long)gTimeNoCopyFlush.total.load(),(unsigned long long)gTimeNoCopyFlush.slowest.load());
+ row("J device answers cached hits=%llu misses=%llu",(unsigned long long)gAnswerHits.load(),(unsigned long long)gAnswerMisses.load());
  for(int i=0,n=gCallRowCount.load();i<n;i++)if(gCallRows[i].t.count.load()>0)
   row("Z call %s n=%llu us=%llu max=%llu",gCallRows[i].name,(unsigned long long)gCallRows[i].t.count.load(),(unsigned long long)gCallRows[i].t.total.load(),(unsigned long long)gCallRows[i].t.slowest.load());
  // The runtime's VkPipeline makings (the creation log, METAL2VULKAN_LOG_PIPELINES; they happen at draws, not at the state's creation) and
