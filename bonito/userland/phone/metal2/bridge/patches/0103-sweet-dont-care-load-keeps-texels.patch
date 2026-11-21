@@ -1,0 +1,19 @@
+diff --git a/crates/metal2vulkan-runtime/src/render.rs b/crates/metal2vulkan-runtime/src/render.rs
+index 119119d..086b582 100644
+--- a/crates/metal2vulkan-runtime/src/render.rs
++++ b/crates/metal2vulkan-runtime/src/render.rs
+@@ -3275,6 +3275,14 @@ impl RenderCommandEncoder {
+         // A `DontCare` load of an attachment the pass stores: loaded in a pass whose draws reach
+         // no tile, else cleared to zero or its clear value, Metal's answer in each tile a draw
+         // reaches (`clear_reach.rs`), and only in those `tiles` bounds.
++        // Sweet (bonito): a pass whose draws reach only some tiles takes the near-equivalent above: the tiles their viewports and scissors reach are
++        // zeroed, where Metal zeroes only the tiles a primitive touches and keeps every other texel. The render server draws only what changed and relies
++        // on the rest of the surface keeping its pixels: the extra zeroed tiles showed as black and stale chunks of the screen. A `DontCare` load is
++        // "don't care": keep the texels (a plain `Load`, bounded to no tile) there; a pass whose draws reach every tile still clears, Metal's exact answer.
++        let (reach, tiles) = match reach {
++            clear_reach::PassReach::Draws => (clear_reach::PassReach::Nothing, None),
++            other => (other, tiles),
++        };
+         let dont_care = clear_reach::dont_care_loads(&mut layout, reach);
+         if let Some(named) = dont_care.named.clone() {
+             device.degrade(Degradation::DontCareLoadTiles, || {
