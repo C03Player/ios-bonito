@@ -1,0 +1,86 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1062,6 +1062,12 @@
+ void bonito_gpu_unmap(uint64_t iova, uint64_t size);
+ int bonito_gpu_submit_n(const uint64_t *ib_iova, const uint32_t *ib_dwords, unsigned n, uint32_t timeout_ms);
+ static bool g6_ring_space(uint32_t need, unsigned timeout_ms);
++/*
++ * Patch 0190, two switches to find out why whole 224x288 render bins of a frame still keep an older frame's pixels after 0188 (the snapshots show rectangles on that
++ * grid): boot-arg sweetgpuwfi=1 puts a CP_WAIT_FOR_IDLE after every IB of a batch (the GPU drains before the next command buffer starts: the original sync tail had one,
++ * 0167 dropped it), sweetgpubatch=N caps the IBs per batch (default 16; 1 = the pre-0179 one-IB-one-fence behavior).
++ */
++static int g6_wfi;
+ int bonito_gpu_submit(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms);
+ 
+ bool
+@@ -1528,7 +1534,7 @@
+ bonito_gpu_submit_n(const uint64_t *ib_iova, const uint32_t *ib_dwords, unsigned n, uint32_t timeout_ms)
+ {
+ 	uint64_t fva = G6_GVA_POOL + G6_OFF_SCRATCH + 0x10;
+-	uint32_t fence, got = 0, dw[16 * 13 + 5];
++	uint32_t fence, got = 0, dw[16 * 14 + 5];
+ 	unsigned cnt = 0;
+ 	int rc;
+ 
+@@ -1574,6 +1580,9 @@
+ 			dw[cnt++] = (uint32_t)((fva + 0xf0) >> 32);
+ 			dw[cnt++] = (uint32_t)i + 1;
+ 		}
++		if (g6_wfi) {
++			dw[cnt++] = g6_pkt7(G6_CP_WAIT_FOR_IDLE, 0);
++		}
+ 	}
+ 	dw[cnt++] = g6_pkt7(0x46, 4);
+ 	dw[cnt++] = 0x04;                                       /* CACHE_FLUSH_TS */
+@@ -1694,7 +1703,7 @@
+ bonito_gpu_submit_async(const uint64_t *ib_iova, const uint32_t *ib_dwords, unsigned n, uint32_t *fence_out)
+ {
+ 	uint64_t fva = G6_GVA_POOL + G6_OFF_SCRATCH + 0x10;
+-	uint32_t dw[16 * 13 + 5], fence, w, first;
++	uint32_t dw[16 * 14 + 5], fence, w, first;
+ 	unsigned cnt = 0;
+ 
+ 	if (!g6_ready || n == 0 || n > 16) {
+@@ -1731,6 +1740,9 @@
+ 			dw[cnt++] = (uint32_t)(fva + 0xf0);     /* scratch + 0x100 */
+ 			dw[cnt++] = (uint32_t)((fva + 0xf0) >> 32);
+ 			dw[cnt++] = (uint32_t)i + 1;
++		}
++		if (g6_wfi) {
++			dw[cnt++] = g6_pkt7(G6_CP_WAIT_FOR_IDLE, 0);
+ 		}
+ 	}
+ 	dw[cnt++] = g6_pkt7(0x46, 4);
+@@ -2285,6 +2297,8 @@
+ 	bonito_gpu_unmap(iova, len);
+ }
+ 
++static uint32_t g6_batch_max = 16;
++
+ /* up to 16 IBs in order; the fence of the last (0: the GPU is not usable) */
+ uint32_t
+ sweet_gpu_submit_v2(const uint64_t *iova, const uint32_t *dwords, unsigned n, bool *busy)
+@@ -2293,8 +2307,8 @@
+ 		*busy = false;
+ 	}
+ 	uint32_t last = 0;
+-	for (unsigned i = 0; i < n; i += 16) {
+-		unsigned k = n - i < 16 ? n - i : 16;
++	for (unsigned i = 0; i < n; i += g6_batch_max) {
++		unsigned k = n - i < g6_batch_max ? n - i : g6_batch_max;
+ 		if (g6_async) {
+ 			if (bonito_gpu_submit_async(iova + i, dwords + i, k, &last)) {
+ 				return 0;
+@@ -2466,6 +2480,11 @@
+ 	PE_parse_boot_argn("sweetgpuregs", &g6_testregs, sizeof(g6_testregs));
+ 	PE_parse_boot_argn("sweetgpupk", &g6_testpk, sizeof(g6_testpk));
+ 	PE_parse_boot_argn("sweetgpuasync", &g6_async, sizeof(g6_async));
++	PE_parse_boot_argn("sweetgpuwfi", &g6_wfi, sizeof(g6_wfi));
++	PE_parse_boot_argn("sweetgpubatch", &g6_batch_max, sizeof(g6_batch_max));
++	if (g6_batch_max < 1 || g6_batch_max > 16) {
++		g6_batch_max = 16;
++	}
+ 	if (enabled >= 4) {
+ 		(void)g6_pool_alloc();          /* early: contiguous memory is gone once the system has run for a while */
+ 	}
