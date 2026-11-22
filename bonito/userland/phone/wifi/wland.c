@@ -28,6 +28,7 @@
 #include <sys/sysctl.h>
 #include <sys/time.h>
 #include "pmem.h"
+#include "scm.h"
 #include "smem.h"
 #include "link.h"
 #include "rmtfs.h"
@@ -612,6 +613,12 @@ static int boot_modem(void)
 	}
 	pm_wr(MBA_PA, mba, (mbalen + 3) & ~3ull);
 	free(mba);
+	/* the downstream driver hands the MBA's 1 MiB to the modem's VM (qcom,mem-protect-id 0xf = VMID_MSS_MSA; pil_assign_mem_to_subsys) after copying it in */
+	{
+		const uint32_t hlos[1] = { VMID_HLOS }, msa[1] = { VMID_MSS_MSA };
+		if (hyp_assign(MBA_PA, 0x100000, hlos, 1, msa, 1))
+			return -1;
+	}
 	qmp_send("{class: image, res: load_state, name: modem, val: on}");
 	/* a restart keeps the last run's state bits until the modem rewrites them: forget them */
 	uint64_t ve;
@@ -622,11 +629,20 @@ static int boot_modem(void)
 		return -1;
 
 	/* 4. the MBA authenticates the headers (ELF header, program headers, hash segment) */
-	wr32(RMB + RMB_PMI_LENGTH, 0);
-	wr32(RMB + RMB_PMI_META, (uint32_t)meta_pa);
-	wr32(RMB + RMB_MBA_COMMAND, 1);	/* CMD_META_DATA_READY */
-	if (wait_status(RMB_MBA_STATUS, 3, 0, 10000, "header authentication"))
-		return -1;
+	{
+		/* the metadata buffer belongs to the modem's VM while the MBA reads it, then back to the kernel */
+		const uint32_t hlos[1] = { VMID_HLOS }, msa[1] = { VMID_MSS_MSA };
+		uint64_t meta_sz = (meta_len + 0xfff) & ~0xfffull;
+		if (hyp_assign(meta_pa, meta_sz, hlos, 1, msa, 1))
+			return -1;
+		wr32(RMB + RMB_PMI_LENGTH, 0);
+		wr32(RMB + RMB_PMI_META, (uint32_t)meta_pa);
+		wr32(RMB + RMB_MBA_COMMAND, 1);	/* CMD_META_DATA_READY */
+		int hrc = wait_status(RMB_MBA_STATUS, 3, 0, 10000, "header authentication");
+		(void)hyp_assign(meta_pa, meta_sz, msa, 1, hlos, 1);
+		if (hrc)
+			return -1;
+	}
 	printf("boot: MBA authenticated the headers\n");
 
 	/* 5. the segments at their addresses, each announced to the MBA as it is loaded (pil_msa_mba_verify_blob) */
