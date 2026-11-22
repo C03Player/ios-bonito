@@ -71,8 +71,8 @@ static Timed *callTimer(const char *name) {
 // /var/local/mtl2-threads starting with 0 turns it off: the calls then run on the caller's thread as before.
 static bool gThreaded=true;
 // Early release (patch 0200): waitUntilScheduled returns at once instead of waiting for the translation worker to translate and submit the whole frame (the render thread was blocked there 71 % of the
-// time). The kernel counts the commits not yet submitted (kern.sweet_gpu_pending) so the panel copy does not use a swap's fence while one is pending. /var/local/mtl2-early starting with 0 turns it off.
-static bool gEarly=true;
+// time). The kernel counts the commits not yet submitted (kern.sweet_gpu_pending) so the panel copy does not use a swap's fence while one is pending. /var/local/mtl2-early starting with 1 turns it on.
+static bool gEarly=false;     // off by default: the swaps ran ahead of the GPU (15 swaps/s) but the panel got no more frames (8 copies/s) and every frame was shown 233 ms or more late; /var/local/mtl2-early starting with 1 turns it on
 static void pendingAdd(int delta) {sysctlbyname("kern.sweet_gpu_pending",nullptr,nullptr,&delta,sizeof delta);}
 static std::mutex gWorkLock;
 static std::condition_variable gWorkCv,gDoneCv;
@@ -1745,7 +1745,7 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
  if(gDeviceObject)return gDeviceObject;
  gMissing=missing;gInFlight=[NSMutableSet set];
  if(FILE *bf=fopen("/var/local/mtl2-bind","r")){const int c=fgetc(bf);fclose(bf);if(c=='0')gBind=false;}      // cpu binding: on unless that file starts with 0
- if(FILE *ef=fopen("/var/local/mtl2-early","r")){const int c=fgetc(ef);fclose(ef);if(c=='0')gEarly=false;}      // early release of waitUntilScheduled: on unless that file starts with 0
+ if(FILE *ef=fopen("/var/local/mtl2-early","r")){const int c=fgetc(ef);fclose(ef);if(c=='1')gEarly=true;}      // early release of waitUntilScheduled: off unless that file starts with 1
  if(FILE *tf=fopen("/var/local/mtl2-threads","r")){const int c=fgetc(tf);fclose(tf);if(c=='0')gThreaded=false;}    // the translation worker: on unless that file starts with 0
  gDevice=nmb_device_open(loader,cache);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return nil;}
