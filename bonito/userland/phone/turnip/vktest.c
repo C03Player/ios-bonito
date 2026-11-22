@@ -139,6 +139,37 @@ static int test_fill(void)
 	return bad != 0;
 }
 
+/* GPU memory bandwidth (2026-11-22): the render server's frame takes about 57 of 81 ms of GPU time whatever the GPU clock, so the memory bus may be the limit (no DDR vote is made on this
+ * SoC). 32 MB buffers: a fill writes them, a copy reads one and writes the other; the rate counts the bytes moved. */
+static int test_bandwidth(void)
+{
+	DFN(vkCmdFillBuffer); DFN(vkCmdCopyBuffer); DFN(vkCmdPipelineBarrier);
+	const uint32_t bytes = 32u << 20;
+	struct buf a = mkbuf(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	struct buf b = mkbuf(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+		.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT };
+	for (int round = 0; round < 3; round++) {
+		const int reps = 16;
+		VkCommandBuffer cb = begin();
+		for (int i = 0; i < reps; i++) {
+			vkCmdFillBuffer(cb, a.b, 0, bytes, 0x01020304u + i);
+			vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+		}
+		double tf = submit_wait(cb);
+		cb = begin();
+		VkBufferCopy c = { 0, 0, bytes };
+		for (int i = 0; i < reps; i++) {
+			vkCmdCopyBuffer(cb, a.b, b.b, 1, &c);
+			vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+		}
+		double tc = submit_wait(cb);
+		printf("PASS bandwidth round %d: fill %d x 32 MB in %.1f ms = %.2f GB/s written; copy %d x 32 MB in %.1f ms = %.2f GB/s read + %.2f GB/s written\n", round, reps, tf,
+		       reps * (bytes / 1e9) / (tf / 1e3), reps, tc, reps * (bytes / 1e9) / (tc / 1e3), reps * (bytes / 1e9) / (tc / 1e3));
+	}
+	return 0;
+}
+
 static int test_compute(void)
 {
 	DFN(vkCreateDescriptorSetLayout); DFN(vkCreatePipelineLayout); DFN(vkCreateComputePipelines);
@@ -354,6 +385,7 @@ int main(int argc, char **argv)
 	CHECK(vkCreateCommandPool(dev, &cpi, NULL, &pool));
 	int fails = test_empty();
 	fails += test_fill();
+	fails += test_bandwidth();
 	fails += test_compute();
 	fails += test_draw();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ALL PASS", fails);
