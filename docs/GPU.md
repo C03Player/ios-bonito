@@ -476,3 +476,19 @@ Switches: /var/local/mtl2-threads (0 = no worker), /var/local/mtl2-bind (0 = no 
 - TU_DEBUG=sysmem (Turnip without its tile memory; now the plugin's default, file content "default" turns it off): series ta 13.8 swaps/s, 10.8 copies/s against 10.7 and 8.0 with the same sampler on (ra), but the later series ua (no sampler) 12.0 and 9.5 against 12.4 and 10.3 without it (qa): the series are noisy, individual boots fall into two groups
   (about 10.8 and about 13.2 swaps/s; the slow ones have 175 ms commit-to-completion against 140 ms: background daemons of the boot storm share the two gold cores with the pinned threads). Three or four boots cannot resolve differences under about 10 %: sysmem is not proven to help.
 - Not done: a GPU memory bandwidth benchmark (the clock-independent part of the GPU time, about 57 of 81 ms a frame at 600 MHz, points at memory or per-pass overhead), a DDR/BCM vote (never implemented for this chip), cheaper blur passes, a quiet measurement window (gestures from 150 s).
+
+## DDR and memory NoC vote (2026-11-22, patches 0203 and 0204, kernel run 45019756272)
+
+The GPU moved only about 4.5 GB/s in a copy (vktest bandwidth test: fill 1.18 GB/s, copy 2.25 read + 2.25 write) against a peak of about 14.9 GB/s (two 16-bit LPDDR4X channels
+at 1866 MHz, Snapdragon 670/710), and nothing voted the memory bus up. Patch 0203 sends the BCM votes MC0 (DDR, command database address 0x50000) and SH0 (memory NoC, 0x5003c)
+to their top levels through the SDM670's apps RSC (DRV 2 at 0x179e0000, TCS from 0x179e0d00; `sweet_rpmh_set_rsc`; the RSC id 0x10100, 8 TCS, 16 commands per TCS answered as expected,
+both votes completed with return code 0). Patch 0204 makes it the default (boot-arg `sweetddr=0` turns it off).
+
+| Boots (same gesture test) | swaps/s | panel copies/s | blocks |
+|---|---|---|---|
+| before, many series | 9.4 to 13.6 (bimodal) | 7.2 to 11.1 | 0 |
+| vote on, series dd (4 boots) | 14.6, 15.0, 16.0, 16.3 (median 15.5) | 10.8 to 11.7 (median 11.4) | 0 of 64 images |
+
+One boot with the vote: 1444 command buffers in the run against 828, commit to complete 131 ms against 168. The things tried before it (separate submit thread, early release of
+waitUntilScheduled, a render area limited to the drawn bounds, Turnip's default render mode, write-back GPU mapping `sweetgpuattr=1`) moved nothing beyond the boot-to-boot spread.
+
