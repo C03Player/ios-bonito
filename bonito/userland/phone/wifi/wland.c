@@ -383,7 +383,7 @@ static uint8_t *slurp(const char *path, size_t *len)
 	fseek(f, 0, SEEK_END);
 	*len = (size_t)ftell(f);
 	fseek(f, 0, SEEK_SET);
-	uint8_t *b = malloc(*len + 1);
+	uint8_t *b = calloc(1, *len + 8);	/* zero padding: a segment is written in whole words */
 	if (b && fread(b, 1, *len, f) != *len) {
 		free(b);
 		b = NULL;
@@ -691,13 +691,31 @@ static int boot_modem(void)
 				fprintf(stderr, "boot: %s missing or short\n", path);
 				return -1;
 			}
-			pm_wr(pa, seg, (ph[i].filesz + 3) & ~3u);
+			/* in 1 MiB steps, each reported when it is slow, with the MBA's status: a stall shows its offset */
+			uint64_t want = (ph[i].filesz + 3) & ~3ull;
+			for (uint64_t o = 0; o < want; o += 0x100000) {
+				uint64_t n = want - o < 0x100000 ? want - o : 0x100000, t1 = now_ms();
+				if (pm_wr(pa + o, seg + o, n)) {
+					fprintf(stderr, "boot: write failed in segment %u at +%llx\n", i, (unsigned long long)o);
+					return -1;
+				}
+				uint64_t dt = now_ms() - t1;
+				if (dt > 300 || (o & 0x7fffff) == 0)
+					printf("boot:   seg %u data +%llx (%llu bytes) %llu ms, mba status %08x\n", i, (unsigned long long)o, (unsigned long long)n,
+					       (unsigned long long)dt, rd32(RMB + RMB_MBA_STATUS));
+			}
 			free(seg);
 			total += ph[i].filesz;
 		}
-		for (uint64_t o = (ph[i].filesz + 3) & ~3ull; o < ph[i].memsz; o += sizeof(zeros)) {
-			uint64_t n = ph[i].memsz - o < sizeof(zeros) ? ph[i].memsz - o : sizeof(zeros);
-			pm_wr(pa + o, zeros, (n + 3) & ~3ull);
+		for (uint64_t o = (ph[i].filesz + 3) & ~3ull, zn = 0; o < ph[i].memsz; o += sizeof(zeros), zn++) {
+			uint64_t n = ph[i].memsz - o < sizeof(zeros) ? ph[i].memsz - o : sizeof(zeros), t1 = now_ms();
+			if (pm_wr(pa + o, zeros, (n + 3) & ~3ull)) {
+				fprintf(stderr, "boot: zero fill failed in segment %u at +%llx\n", i, (unsigned long long)o);
+				return -1;
+			}
+			uint64_t dt = now_ms() - t1;
+			if (dt > 300 || (zn & 15) == 0)
+				printf("boot:   seg %u zeros +%llx %llu ms, mba status %08x\n", i, (unsigned long long)o, (unsigned long long)dt, rd32(RMB + RMB_MBA_STATUS));
 		}
 		if (img_length == 0) {
 			wr32(RMB + RMB_PMI_START, (uint32_t)pa);
