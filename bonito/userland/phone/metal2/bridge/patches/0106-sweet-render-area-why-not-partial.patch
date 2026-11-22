@@ -1,0 +1,81 @@
+diff --git a/crates/metal2vulkan-runtime/src/render.rs b/crates/metal2vulkan-runtime/src/render.rs
+index ef33af0..62770aa 100644
+--- a/crates/metal2vulkan-runtime/src/render.rs
++++ b/crates/metal2vulkan-runtime/src/render.rs
+@@ -3868,25 +3868,35 @@ impl RenderCommandEncoder {
+         // rectangles into the full-screen surface (3292 passes of 1080x2160 loading and storing the whole surface in one 4 minute run: 96 % of all the pixels). Any other kind of pass
+         // (several instances, tile dispatches, shadowed or rotated textures, reformats, resolves, a depth or stencil attachment, a clear) keeps the whole area.
+         // SWEET_FULL_AREA in the environment turns this off.
+-        let plain = instances.len() == 1
+-            && dispatches.is_empty()
+-            && !texels_shadowed
+-            && !resolve_after
+-            && resolved.is_empty()
+-            && later_resolves.is_empty()
+-            && rewritten.is_none()
+-            && copy_in.is_none()
+-            && stand_ins_in.is_none()
+-            && reach_clears.is_none()
+-            && layout.depth_stencil.is_none()
+-            && instances.iter().all(|instance| instance.reformats.is_empty())
+-            && layout
++        static WHY: [std::sync::atomic::AtomicU64; 12] = [const { std::sync::atomic::AtomicU64::new(0) }; 12];
++        let conditions = [
++            instances.len() != 1,
++            !dispatches.is_empty(),
++            texels_shadowed,
++            resolve_after,
++            !resolved.is_empty() || !later_resolves.is_empty(),
++            rewritten.is_some() || copy_in.is_some() || stand_ins_in.is_some(),
++            reach_clears.is_some(),
++            layout.depth_stencil.is_some(),
++            instances.iter().any(|instance| !instance.reformats.is_empty()),
++            layout
+                 .colors
+                 .iter()
+                 .flatten()
+-                .all(|color| color.load != LoadAction::Clear)
+-            && std::env::var_os("SWEET_FULL_AREA").is_none();
++                .any(|color| color.load == LoadAction::Clear),
++        ];
++        if width * height >= 2_000_000 {
++            for (index, failed) in conditions.iter().enumerate() {
++                if *failed {
++                    WHY[index].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                }
++            }
++        }
++        let plain = !conditions.iter().any(|failed| *failed) && std::env::var_os("SWEET_FULL_AREA").is_none();
+         if plain {
++            if drawn.bounds().is_none() && width * height >= 2_000_000 {
++                WHY[10].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            }
+             if let Some([x0, y0, x1, y1]) = drawn.bounds() {
+                 let (x0, y0) = (x0 / 32 * 32, y0 / 32 * 32);
+                 let (x1, y1) = (x1.div_ceil(32) * 32, y1.div_ceil(32) * 32);
+@@ -3924,13 +3934,24 @@ impl RenderCommandEncoder {
+             if passes % 500 == 0 {
+                 use std::io::Write;
+                 let line = format!(
+-                    "area: {passes} full-screen passes, mean area {}% of the surface; up to 5%: {}, up to 25%: {}, up to 50%: {}, under 100%: {}, whole: {}\n",
++                    "area: {passes} full-screen passes, mean area {}% of the surface; up to 5%: {}, up to 25%: {}, up to 50%: {}, under 100%: {}, whole: {}; why not partial: instances {} dispatches {} shadowed {} resolve_after {} resolved {} copies {} reach_clears {} depth {} reformats {} clear {} unbounded {}\n",
+                     STATS[1].load(Relaxed) / passes,
+                     STATS[3].load(Relaxed),
+                     STATS[4].load(Relaxed),
+                     STATS[5].load(Relaxed),
+                     STATS[6].load(Relaxed),
+                     STATS[7].load(Relaxed),
++                    WHY[0].load(Relaxed),
++                    WHY[1].load(Relaxed),
++                    WHY[2].load(Relaxed),
++                    WHY[3].load(Relaxed),
++                    WHY[4].load(Relaxed),
++                    WHY[5].load(Relaxed),
++                    WHY[6].load(Relaxed),
++                    WHY[7].load(Relaxed),
++                    WHY[8].load(Relaxed),
++                    WHY[9].load(Relaxed),
++                    WHY[10].load(Relaxed),
+                 );
+                 if let Ok(mut file) = std::fs::OpenOptions::new()
+                     .create(true)
