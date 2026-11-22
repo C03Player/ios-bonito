@@ -301,6 +301,47 @@ static void dump_crash_reason(void)
 	printf("crash reason: smem item 421 not found\n");
 }
 
+/*
+ * After ERR-FATAL: the modem's error handler keeps its crash context in the modem's DDR as well (the message text and the registers beside it). Scan the modem region (152 MiB) for
+ * "EX:kernel" and save 8 KiB around each hit (up to 4) to /var/local/modem-crash-N.bin, to read in the recovery.
+ */
+static uint64_t now_ms(void);
+
+static void dump_crash_memory(void)
+{
+	const uint64_t base = 0x8b000000ull, size = 0x09800000ull;	/* the modem region (the B4 overlay), see base below */
+	static uint8_t chunk[0x40000 + 64];
+	static const char needle[] = "EX:kernel";
+	int hits = 0;
+	uint64_t t0 = now_ms();
+	for (uint64_t o = 0; o < size && hits < 4; o += 0x40000) {
+		uint64_t n = size - o < 0x40000 ? size - o : 0x40000;
+		if (pm_rd(base + o, chunk, n))
+			continue;
+		for (uint64_t i = 0; i + sizeof(needle) - 1 <= n; i++) {
+			if (chunk[i] != 'E' || memcmp(chunk + i, needle, sizeof(needle) - 1))
+				continue;
+			uint64_t at = base + o + i, from = (at & ~0xfffull) - 0x1000;
+			static uint8_t buf[0x2000];
+			char path[64];
+			snprintf(path, sizeof(path), "/var/local/modem-crash-%d.bin", hits);
+			if (!pm_rd(from, buf, sizeof(buf))) {
+				FILE *f = fopen(path, "wb");
+				if (f) {
+					fwrite(buf, 1, sizeof(buf), f);
+					fclose(f);
+				}
+			}
+			printf("crash memory: \"EX:kernel\" at %llx, 8 KiB from %llx saved to %s\n", (unsigned long long)at, (unsigned long long)from, path);
+			hits++;
+			i += 0xfff;
+			if (hits == 4)
+				break;
+		}
+	}
+	printf("crash memory: scan of the modem region done in %llu ms, %d hit(s)\n", (unsigned long long)(now_ms() - t0), hits);
+}
+
 static void smp2p_service(void)
 {
 	uint64_t ip;
@@ -318,8 +359,10 @@ static void smp2p_service(void)
 	if (smp2p_in_value("slave-kernel", &v) == 0 && v != modem_state) {
 		printf("[%6llu] smp2p: modem state %x%s%s%s%s\n", (unsigned long long)link_ms(), v, v & 1 ? " ERR-FATAL" : "", v & 2 ? " ready" : "",
 		       v & 4 ? " handover" : "", v & 8 ? " stop-ack" : "");
-		if ((v & 1) && !(modem_state != 0xffffffff && (modem_state & 1)))
+		if ((v & 1) && !(modem_state != 0xffffffff && (modem_state & 1))) {
 			dump_crash_reason();
+			dump_crash_memory();
+		}
 		modem_state = v;
 	}
 }
