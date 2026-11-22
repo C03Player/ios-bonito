@@ -1,0 +1,15 @@
+diff --git a/crates/metal2vulkan-runtime/src/render.rs b/crates/metal2vulkan-runtime/src/render.rs
+index 62770aa..b4874b0 100644
+--- a/crates/metal2vulkan-runtime/src/render.rs
++++ b/crates/metal2vulkan-runtime/src/render.rs
+@@ -3872,7 +3872,9 @@ impl RenderCommandEncoder {
+         let conditions = [
+             instances.len() != 1,
+             !dispatches.is_empty(),
+-            texels_shadowed,
++            // A pass whose draws reach no tile (`reach` is `Nothing`, which sweet patch 0103 makes of most) leaves its shadowed attachments in place and copies nothing of them: a shadow
++            // there does not depend on the render area.
++            texels_shadowed && reach != clear_reach::PassReach::Nothing,
+             resolve_after,
+             !resolved.is_empty() || !later_resolves.is_empty(),
+             rewritten.is_some() || copy_in.is_some() || stand_ins_in.is_some(),
