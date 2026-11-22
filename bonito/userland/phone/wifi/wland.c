@@ -262,6 +262,30 @@ static int smp2p_in_value(const char *name, uint32_t *v)
  * (slave-kernel: 0 err-fatal, 1 ready, 2 handover, 3 stop-ack).
  */
 static uint32_t modem_state = 0xffffffff;
+
+/* the modem's crash reason: SMEM item 421 (Linux qcom_q6v5: qcom_smem_get(HOST_ANY, 421)), a text of file:line and message */
+static void dump_crash_reason(void)
+{
+	for (int k = 0; k < 2; k++) {
+		unsigned host = k ? SMEM_HOST_MODEM : SMEM_HOST_GLOBAL;
+		uint64_t pa;
+		uint32_t sz;
+		if (smem_get(host, 421, &pa, &sz))
+			continue;
+		char txt[257] = "";
+		for (uint32_t o = 0; o < sz && o < 256; o += 4) {
+			uint32_t w = rd32(pa + o);
+			for (int b = 0; b < 4 && o + b < 256; b++) {
+				uint8_t c = (uint8_t)(w >> (8 * b));
+				txt[o + b] = (c >= 32 && c < 127) ? (char)c : (c ? '?' : 0);
+			}
+		}
+		printf("crash reason (smem 421, host %#x, %u bytes): \"%s\"\n", host, sz, txt);
+		return;
+	}
+	printf("crash reason: smem item 421 not found\n");
+}
+
 static void smp2p_service(void)
 {
 	uint64_t ip;
@@ -279,6 +303,8 @@ static void smp2p_service(void)
 	if (smp2p_in_value("slave-kernel", &v) == 0 && v != modem_state) {
 		printf("[%6llu] smp2p: modem state %x%s%s%s%s\n", (unsigned long long)link_ms(), v, v & 1 ? " ERR-FATAL" : "", v & 2 ? " ready" : "",
 		       v & 4 ? " handover" : "", v & 8 ? " stop-ack" : "");
+		if ((v & 1) && !(modem_state != 0xffffffff && (modem_state & 1)))
+			dump_crash_reason();
 		modem_state = v;
 	}
 }
