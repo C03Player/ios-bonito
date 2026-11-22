@@ -1062,6 +1062,10 @@ int main(int argc, char **argv)
 	} else if (!strcmp(c, "wlan-power")) {
 		return wlan_power() ? 1 : 0;
 	} else if (!strcmp(c, "boot")) {
+		/* "boot SECS": wait first. Started at the beginning of the phone's boot, the firmware files (75 MB) are read from an eMMC that iOS is saturating: single reads took
+		 * 12 to 100+ seconds. */
+		if (argc > 2)
+			sleep((unsigned)atoi(argv[2]));
 		return boot_modem() ? 1 : 0;
 	} else if (!strcmp(c, "bcm") && argc > 3) {
 		/* a BCM (bus) vote: x = average, y = peak, in the BCM's own units (0x3fff = its top level); commit + valid */
