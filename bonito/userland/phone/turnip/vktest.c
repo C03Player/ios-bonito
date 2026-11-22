@@ -334,6 +334,7 @@ static int test_draw(void)
 
 int main(int argc, char **argv)
 {
+	setvbuf(stdout, NULL, _IOLBF, 0);	/* the log must survive a crash or a reset of the phone */
 	const char *lib = argc > 1 ? argv[1] : "/var/local/lib/libvulkan_freedreno.dylib";
 	double t0 = now_ms();
 	void *h = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
