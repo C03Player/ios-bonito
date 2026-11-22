@@ -152,6 +152,21 @@ static int wlan_power(void)
 	return qmp_send("{class: clock, res: qdss, val: 1}") ? -1 : 0;
 }
 
+/*
+ * The rails the stock device tree marks qcom,proxy-consumer-enable (the AP's kernel switches them on at boot for the modem until it takes over): PM660 L1 1.2 V, PM660 L11 1.8 V and
+ * PM660L L1 0.88 V. Without them the modem's RF task took an exception about 0.9 s after it was ready ("[rf]EX:kernel:0:rf:171:PC=d949b6d4" in SMEM item 421).
+ */
+static int modem_rails(void)
+{
+	static const struct { const char *res; uint32_t mv; } ldo[] = { { "ldoa1", 1200 }, { "ldoa11", 1800 }, { "ldob1", 880 } };
+	for (unsigned i = 0; i < sizeof(ldo) / sizeof(ldo[0]); i++) {
+		uint32_t off[3] = { 0, 8, 4 }, val[3] = { ldo[i].mv, 7, 1 };
+		int rc = pm_rpmh(ldo[i].res, 3, off, val);
+		printf("modem rails: %s %u mV on -> %d\n", ldo[i].res, ldo[i].mv, rc);
+	}
+	return 0;
+}
+
 /* SMP2P item: magic "$SMP", version/features, local/remote pid, total/valid entries, flags, entries[16+4] */
 static void smp2p_show(const char *what, unsigned item)
 {
@@ -1011,6 +1026,7 @@ static int up(unsigned secs)
 {
 	if (smmu_wlan_identity())
 		printf("up: no WLAN SMMU stream: the radio will not start\n");
+	modem_rails();
 	if (wlan_power() || smp2p_create() || boot_modem())
 		return 1;
 	return net(secs) ? 1 : 0;
