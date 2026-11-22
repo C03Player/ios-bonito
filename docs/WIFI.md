@@ -23,9 +23,9 @@ That part of wland (`boot_modem`) has to be replaced; the rest is reused with th
 
 | What | Value | flame |
 |---|---|---|
-| modem region | `0x8b000000`, 0x7e00000 (ELF entry of modem.mdt is 0x8b000000) | `0x8dc00000` |
-| WLAN MSA | `0x93300000`, 0x100000 | `0x8bc00000` |
-| MBA region | `0x93c00000`, 0x200000 | not used |
+| modem region | `0x8b000000`, **0x9800000** (the B4 dtbo overlay; the base DT says 0x7e00000; the modem image's segments run to 0x94800000) | `0x8dc00000` |
+| WLAN MSA | **`0x94d00000`**, 0x100000 (overlay; base DT 0x93300000) | `0x8bc00000` |
+| MBA region | **`0x95600000`**, 0x200000 (overlay; base DT 0x93c00000, which lies inside the modem region on the bonito) | not used |
 | GLINK smem | `0x86000000`; irq register `0x1799000c`, mask `0x1000` | `0x17c0000c` |
 | QDSP6 SS | `0x4080000` (0x100); halt q6 `0x1f63000`, modem `0x1f65000`, nc `0x1f64000`; RMB `0x4180000`; restart `0xc2b0000`; pdc sync `0xb2e0100`; alt reset `0x4180044` | |
 | cmd-db locator | `0x0c3f000c` (same), apps RSC DRV2 `0x179e0000` (works since patch 0203) | |
@@ -72,3 +72,10 @@ instead of the Pixel 4's PM8150 LDOs). Not done and untested on the phone: every
 - It compiles in a syntax check only (host gcc with a sysctl stub). The iOS build is a step of the userland workflow (artifact `userland-gpu`, file `wland`).
 - Needed on the phone before a run: `/var/local/fw/modem/` with `modem.mdt`, `modem.bNN`, `mba.mbn`, `wlanmdsp.mbn`, `bdwlan-bonito*.bin`; `/var/local/fw/rmtfs/` images
   (`modemst1.img`, `modemst2.img`, `fsg.img`, `fsc.img`, see `rmtfs.c`), kernel boot-arg `sweetpmem=1`, run `wland` as root.
+
+## Memory map lesson (2026-11-22)
+
+The device tree in the stock boot image (`stock/dtbs/0.dtb`) is the base SDM670 tree. The phone's real reserved memory comes from the model's dtbo overlay
+(`stock/dtbo.img`, entry 8 = "Google Inc. MSM sdm670 B4 PVT v1.0": B4 = bonito, S4 = sargo; decompile with `dtc -I dtb -O dts`). Its regions: modem `0x8b000000+0x9800000`,
+video `0x94800000+0x500000`, WLAN MSA `0x94d00000+0x100000`, cdsp `0x94e00000+0x800000`, MBA `0x95600000+0x200000`, adsp `0x95800000+0x2200000`. Using the base tree's addresses put
+the MBA and the metadata inside the modem region, so the modem's own segments collided with them and the load stalled.

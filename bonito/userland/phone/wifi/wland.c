@@ -359,9 +359,9 @@ static int qmp_send(const char *msg)
 /* ---- modem boot: TrustZone PAS (Linux qcom_q6v5_pas + qcom_mdt_loader) ---- */
 
 #define PAS_MODEM	4
-#define MPSS_PA		0x8b000000ull	/* bonito modem_region (stock DT) */
-#define MPSS_SIZE	0x07e00000ull
-#define MBA_PA		0x93c00000ull	/* pil_mba_region, 2 MiB */
+#define MPSS_PA		0x8b000000ull	/* bonito modem_region: the B4 dtbo overlay makes it 152 MiB (the base SDM670 DT says 126) */
+#define MPSS_SIZE	0x09800000ull
+#define MBA_PA		0x95600000ull	/* pil_mba_region in the B4 dtbo overlay (fragment 41), 2 MiB; the base DT says 0x93c00000 which is inside the modem region here */
 #define MBA_SIZE	0x00200000ull
 #define FW_DIR		"/var/local/fw/modem"
 #define SCM_PIL(cmd)	(0x42000000ull | (2u << 8) | (cmd))

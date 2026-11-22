@@ -31,7 +31,7 @@
 #define FW_INIT_DONE_IND 0x38
 
 #define CLIENT_ID	0x4b4e454c	/* ath10k's */
-#define MSA_PA		0x93300000ull	/* bonito wlan_msa_region (stock DT), 1 MiB */
+#define MSA_PA		0x94d00000ull	/* bonito wlan_msa_region in the B4 dtbo overlay (fragment 39), 1 MiB */
 #define MSA_SIZE	0x100000u	/* qcom,wlan-msa-memory */
 #define BDF_PATH	"/var/local/fw/modem/bdwlan-bonito.bin"
 #define BDF_PATH2	"/var/local/fw/modem/bdwlan-bonito-USA.bin"
