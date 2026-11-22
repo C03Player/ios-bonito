@@ -69,6 +69,17 @@ static Timed *callTimer(const char *name) {
 // kept alive by the queued block (ARC) and pointer arguments are copied when queued; failures are noted on the command buffer by the worker (it is refused at commit, as before); a commit is queued
 // too (flush, registration, submit) and everything that needs the work done first (status, waits, a CPU access to a resource in flight) drains the command buffer's queue before it looks.
 // /var/local/mtl2-threads starting with 0 turns it off: the calls then run on the caller's thread as before.
+// Render pass histogram (2026-11-22): what the roughly 30 IBs and 27 Mpixels of a frame are made of. Key: size, pixel format, load and store action of colour 0, depth/stencil, samples.
+struct PassKey {uint32_t w,h,fmt,load,store,depth,samples;bool operator==(const PassKey &o) const {return !memcmp(this,&o,sizeof *this);}};
+struct PassHist {PassKey key;uint64_t n;};
+static std::mutex gPassHistLock;
+static PassHist gPassHist[96];
+static int gPassHistN;
+static void passHistAdd(const PassKey &k) {
+ std::lock_guard<std::mutex> lock(gPassHistLock);
+ for(int i=0;i<gPassHistN;i++)if(gPassHist[i].key==k){gPassHist[i].n++;return;}
+ if(gPassHistN<96){gPassHist[gPassHistN].key=k;gPassHist[gPassHistN].n=1;gPassHistN++;}
+}
 static bool gThreaded=true;
 // Early release (patch 0200): waitUntilScheduled returns at once instead of waiting for the translation worker to translate and submit the whole frame (the render thread was blocked there 71 % of the
 // time). The kernel counts the commits not yet submitted (kern.sweet_gpu_pending) so the panel copy does not use a swap's fence while one is pending. /var/local/mtl2-early starting with 1 turns it on.
@@ -996,6 +1007,8 @@ static void scheduled(void *context);
   if(first) {
    const uint64_t pixels=(uint64_t)first.width*first.height;
    gPasses++;gPassPixels+=pixels;encodedWork.passes++;encodedWork.pixels+=pixels;
+   {PassKey k;memset(&k,0,sizeof k);k.w=(uint32_t)first.width;k.h=(uint32_t)first.height;k.fmt=(uint32_t)first.pixelFormat;k.load=(uint32_t)d.colorAttachments[0].loadAction;k.store=(uint32_t)d.colorAttachments[0].storeAction;
+    k.depth=(d.depthAttachment.texture?1:0)|(d.stencilAttachment.texture?2:0);k.samples=(uint32_t)first.sampleCount;passHistAdd(k);}
    uint64_t seen=gBiggestPass.load();while(pixels>seen && !gBiggestPass.compare_exchange_weak(seen,pixels)){}
    if(pixels>=2000000)gFullScreenPasses++;
   }
@@ -1941,6 +1954,15 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
  {
   std::lock_guard<std::mutex> lock(gCommitLock);
   const uint32_t newest=(uint32_t)gCommits.load();
+  {
+   std::lock_guard<std::mutex> hl(gPassHistLock);
+   bool used[96]={};
+   for(int t=0;t<24;t++){
+    int best=-1;for(int i=0;i<gPassHistN;i++)if(!used[i]&&(best<0||gPassHist[i].n*gPassHist[i].key.w*gPassHist[i].key.h>gPassHist[best].n*gPassHist[best].key.w*gPassHist[best].key.h))best=i;
+    if(best<0)break;used[best]=true;const PassHist &h=gPassHist[best];
+    row("N pass %ux%u fmt%u load%u store%u ds%u ms%u: n=%llu Mpx=%llu",h.key.w,h.key.h,h.key.fmt,h.key.load,h.key.store,h.key.depth,h.key.samples,(unsigned long long)h.n,(unsigned long long)(h.n*h.key.w*h.key.h/1000000));
+   }
+  }
   row("%s","Q timing v2: per-buffer API counts; ctc=commit-to-callback; age includes caller idle");
   for(uint32_t k=0;k<20 && k<newest;k++) {
    const CommitRecord &r=gCommitRing[(newest-k)%32];
