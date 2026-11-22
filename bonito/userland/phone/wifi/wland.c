@@ -672,10 +672,12 @@ static int boot_modem(void)
 	uint64_t total = 0;
 	static uint8_t zeros[0x10000];
 	uint32_t img_length = 0;
+	uint64_t seg_t0 = now_ms();
 	for (uint32_t i = 0; i < phnum; i++) {
 		if (ph[i].type != 1 || (int)i == hash || !ph[i].memsz)
 			continue;
 		uint64_t pa = ph[i].paddr;
+		printf("boot: segment %u: pa %llx file %u mem %u (%llu ms)\n", i, (unsigned long long)pa, ph[i].filesz, ph[i].memsz, (unsigned long long)(now_ms() - seg_t0));
 		if (pa < MPSS_PA || pa + ph[i].memsz > MPSS_PA + MPSS_SIZE) {
 			fprintf(stderr, "boot: segment %u at %llx outside the region\n", i, (unsigned long long)pa);
 			return -1;
