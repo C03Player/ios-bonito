@@ -1,0 +1,11 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -1195,6 +1195,7 @@
+ 	    want, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	sweet_log_start();
++	sweet_pmem_init();       /* patch 0205: /dev/pmem for the Wi-Fi driver (userland wland): bsd/dev/sweet_pmem.c, boot-arg sweetpmem=0 leaves it out */
+ 	sweet_cpufreq_init();   /* raise the CPU clusters from the bootloader low default (boot-arg flamecpufreq=0 leaves them): bsd/dev/sweet_cpufreq.c */
+ 	sweet_sample_start();   /* console heartbeat + where the watched processes wait (boot-arg sweetsample=a,b,c; "-" = off): bsd/dev/sweet_sample.c */
+ 	{
