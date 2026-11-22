@@ -1,0 +1,46 @@
+diff --git a/crates/metal2vulkan-runtime/src/render.rs b/crates/metal2vulkan-runtime/src/render.rs
+--- a/crates/metal2vulkan-runtime/src/render.rs
++++ b/crates/metal2vulkan-runtime/src/render.rs
+@@ -3900,6 +3900,42 @@ impl RenderCommandEncoder {
+                 }
+             }
+         }
++        // Sweet (bonito): statistics of the full-screen passes' render areas, appended to /var/local/m2v-area.log every 500 of them.
++        if u64::from(width) * u64::from(height) >= 2_000_000 {
++            use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
++            static STATS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
++            let full = u64::from(width) * u64::from(height);
++            let area = u64::from(render_area.extent.width) * u64::from(render_area.extent.height);
++            let bucket = match () {
++                _ if area >= full => 7,
++                _ if area * 2 > full => 6,
++                _ if area * 4 > full => 5,
++                _ if area * 20 > full => 4,
++                _ => 3,
++            };
++            STATS[bucket].fetch_add(1, Relaxed);
++            STATS[1].fetch_add(area * 100 / full, Relaxed);
++            let passes = STATS[0].fetch_add(1, Relaxed) + 1;
++            if passes % 500 == 0 {
++                use std::io::Write;
++                let line = format!(
++                    "area: {passes} full-screen passes, mean area {}% of the surface; up to 5%: {}, up to 25%: {}, up to 50%: {}, under 100%: {}, whole: {}\n",
++                    STATS[1].load(Relaxed) / passes,
++                    STATS[3].load(Relaxed),
++                    STATS[4].load(Relaxed),
++                    STATS[5].load(Relaxed),
++                    STATS[6].load(Relaxed),
++                    STATS[7].load(Relaxed),
++                );
++                if let Ok(mut file) = std::fs::OpenOptions::new()
++                    .create(true)
++                    .append(true)
++                    .open("/var/local/m2v-area.log")
++                {
++                    let _ = file.write_all(line.as_bytes());
++                }
++            }
++        }
+         if let Some(first) = &first_texel_copies {
+             core.shadow_copies(first);
+         }
