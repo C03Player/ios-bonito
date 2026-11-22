@@ -27,6 +27,7 @@
 #include <signal.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
+#include <time.h>
 #include "pmem.h"
 #include "scm.h"
 #include "smem.h"
@@ -432,9 +433,18 @@ static int cbcr_on(const char *name, uint64_t pa)
 	return -1;
 }
 
+static uint64_t now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+/* real-time waits (a loop count is not time: every read is a system call and every usleep rounds up); the RMB registers are printed every 2 s while waiting */
 static int wait_status(unsigned off, uint32_t want, uint32_t want2, int ms, const char *what)
 {
-	for (int i = 0; i < ms * 10; i++) {
+	uint64_t t0 = now_ms(), shown = t0;
+	for (;;) {
 		uint32_t v = rd32(RMB + off);
 		if (v == want || (want2 && v == want2))
 			return 0;
@@ -443,7 +453,15 @@ static int wait_status(unsigned off, uint32_t want, uint32_t want2, int ms, cons
 			rmb_dump(what);
 			return -1;
 		}
-		usleep(100);
+		uint64_t t = now_ms();
+		if (t - t0 > (uint64_t)ms)
+			break;
+		if (t - shown >= 2000) {
+			shown = t;
+			printf("mba: waiting for %s (%llu ms):\n", what, (unsigned long long)(t - t0));
+			rmb_dump(what);
+		}
+		usleep(1000);
 	}
 	fprintf(stderr, "mba: %s timed out\n", what);
 	rmb_dump(what);
@@ -452,13 +470,16 @@ static int wait_status(unsigned off, uint32_t want, uint32_t want2, int ms, cons
 
 static int wait_nonzero(unsigned off, int ms, const char *what, uint32_t *out)
 {
-	for (int i = 0; i < ms * 10; i++) {
+	uint64_t t0 = now_ms();
+	for (;;) {
 		uint32_t v = rd32(RMB + off);
 		if (v) {
 			*out = v;
 			return 0;
 		}
-		usleep(100);
+		if (now_ms() - t0 > (uint64_t)ms)
+			break;
+		usleep(1000);
 	}
 	fprintf(stderr, "mba: %s timed out\n", what);
 	rmb_dump(what);
@@ -511,12 +532,12 @@ static int mba_start(uint64_t mba_pa)
 	wr32(Q6SS + 0x400, 1);
 	wr32(Q6SS + 0x404, 1);
 	int fsm = -1;
-	for (int i = 0; i < 1000; i++) {
+	for (uint64_t t0 = now_ms(); now_ms() - t0 < 100;) {
 		if (rd32(RMB + RMB_MSS_STATUS) & 1) {
 			fsm = 0;
 			break;
 		}
-		usleep(10);
+		usleep(100);
 	}
 	printf("mba: boot FSM %s (mss_status %08x)\n", fsm ? "did not complete" : "complete", rd32(RMB + RMB_MSS_STATUS));
 	if (fsm)
@@ -598,10 +619,12 @@ static int boot_modem(void)
 		memcpy(meta + ehsz, h, ph[hash].filesz);
 		free(h);
 	}
-	uint64_t meta_pa = pm_alloc(meta_len, 0x1000);
-	if (!meta_pa)
+	/* the MBA's address register is 32 bits wide: the metadata goes into the MBA region's second MiB (as the downstream driver, which allocates it from the MBA's own memory-region),
+	 * not into managed RAM, which lies above 4 GiB on this phone */
+	uint64_t meta_pa = MBA_PA + 0x100000;
+	if (meta_len > 0x100000)
 		return -1;
-	pm_wr(meta_pa, meta, meta_len);
+	pm_wr(meta_pa, meta, (meta_len + 3) & ~3ull);
 	printf("boot: metadata %zu bytes at %llx\n", meta_len, (unsigned long long)meta_pa);
 
 	/* 3. the MBA image into its region, then the AOP, the SMP2P state, and the subsystem reset with the boot FSM */
