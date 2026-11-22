@@ -1,0 +1,12 @@
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -15,7 +15,7 @@
+ 
+ /* Live downstream DT has two positional reg entries, no reg-names. */
+ /* Patch 0203: the apps RSC's DRV 2 (the flame's SM8150: 0x18220000; the bonito's SDM670: 0x179e0000, TCS offset 0xd00): sweet_rpmh_set_rsc() before the first write. */
+-static uint32_t rh_rsc_pa = 0x18220000u, rh_tcs_pa = 0x18220d00u;
++static uint32_t rh_rsc_pa = 0x179e0000u, rh_tcs_pa = 0x179e0d00u;     /* patch 0206: the bonito SDM670's default (the flame's SM8150 address hangs the bus here: the phone died in the first RPMh vote of wland) */
+ #define RH_RSC_PA       rh_rsc_pa
+ #define RH_TCS_PA       rh_tcs_pa
+ #define RH_TCS_SIZE     0x3000u
