@@ -1107,6 +1107,10 @@ int main(int argc, char **argv)
 	} else if (!strcmp(c, "boot")) {
 		/* "boot SECS": wait first. Started at the beginning of the phone's boot, the firmware files (75 MB) are read from an eMMC that iOS is saturating: single reads took
 		 * 12 to 100+ seconds. */
+		/* launchd's per-process memory limit killed the job while the firmware loaded (kernel log: CRASH wland sig 9, reason ns 1 code 0x7 = jetsam per-process limit): raise it as auto does */
+		struct memlimit_properties ml = { 2048, 0, 2048, 0 };
+		int mrc = memorystatus_control(7, getpid(), 0, &ml, sizeof(ml));
+		printf("boot: memory limit 2048 MB -> %d\n", mrc);
 		if (argc > 2)
 			sleep((unsigned)atoi(argv[2]));
 		return boot_modem() ? 1 : 0;
