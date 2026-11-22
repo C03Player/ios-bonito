@@ -65,6 +65,7 @@ jobs:
         run: |
           sh bonito/userland/phone/metal2/build.sh
           sh bonito/userland/phone/turnip/build.sh
+          sh bonito/userland/phone/wifi/build.sh
 
       - name: Pack
         run: |
@@ -74,6 +75,7 @@ jobs:
           cp phone/metal2/out/m2vtest ../../out-userland/
           cp phone/metal2/out/SweetMetal2.unstripped ../../out-userland/
           cp phone/turnip/out/vktest phone/turnip/out/libvulkan_freedreno.dylib ../../out-userland/
+          cp phone/wifi/out/wland ../../out-userland/
           ls -la ../../out-userland
 
       - uses: actions/upload-artifact@v4

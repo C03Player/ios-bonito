@@ -56,3 +56,19 @@ No hyp-assign is needed: this DT has no `qcom,subsys-vmid`; the MBA protects the
 - Whether the GCC clock register offsets and the QDSP6 v65 power sequence below `__pil_q6v55_reset` (BHS ack, LDO, memory sequence) need the full downstream text (read it from `pil-q6v5.c` lines 470-640 when writing the code).
 - The modem needs `modemst1/2`, `fsg`, `fsc` through rmtfs (wland's `rmtfs.c`, partition names `/boot/modem_fs1`, `/boot/modem_fs2`, `/boot/modem_fsg`, `/boot/modem_fsc`).
 - iOS side: `en0` and apple80211 come from the flame kernel glue; whether iOS's `wifid` accepts it on this phone is unknown.
+
+## Credits
+
+`bonito/userland/phone/wifi` starts as a copy of ios-flame's `phone/wifi` (ios-flame commit 745c434, MIT, Copyright (c) 2026 dipa-studio / the ios-flame contributors;
+itself a fork of ios-sweet). Changed for bonito: the modem boot (TrustZone PAS replaced by the MBA sequence of section "The boot sequence to write"), the IPC register
+(`0x1799000c`), the modem, MBA and WLAN MSA regions, the board data names (`bdwlan-bonito*.bin`), and the WLAN supplies (PM660 L5 0.8 V, L9 1.8 V, L6 1.3 V, L19 3.1 V
+instead of the Pixel 4's PM8150 LDOs). Not done and untested on the phone: everything.
+
+## Status of the code (2026-11-22)
+
+- `wland.c` `boot_modem()` now does: ARC votes (cx, mx, mss), metadata from `modem.mdt`, `mba.mbn` into `0x93c00000`, AOP "load_state" message, `mba_start()` (GCC clocks, subsystem
+  reset, `RMB_MBA_IMAGE`, QDSP6 boot FSM, PBL/MBA status), header authentication (`RMB_PMI_META`, command 1, status 3), each segment announced as it is loaded (command 2, growing
+  `RMB_PMI_LENGTH`), status 4, then waits for the SMP2P "ready" bit as before.
+- It compiles in a syntax check only (host gcc with a sysctl stub). The iOS build is a step of the userland workflow (artifact `userland-gpu`, file `wland`).
+- Needed on the phone before a run: `/var/local/fw/modem/` with `modem.mdt`, `modem.bNN`, `mba.mbn`, `wlanmdsp.mbn`, `bdwlan-bonito*.bin`; `/var/local/fw/rmtfs/` images
+  (`modemst1.img`, `modemst2.img`, `fsg.img`, `fsc.img`, see `rmtfs.c`), kernel boot-arg `sweetpmem=1`, run `wland` as root.
