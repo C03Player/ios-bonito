@@ -1,0 +1,48 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -964,6 +964,13 @@
+ 	return t;
+ }
+ 
++/*
++ * Patch 0202, boot-arg sweetgpuattr=N: the MAIR index (0 = 0x44 normal non-cacheable, the default; 1 = 0xff write-back read/write-allocate) of the 4 KiB pages of the user buffers and of
++ * g6_map. The GPU moved 2.3 GB/s read + 2.3 GB/s written in a copy (vktest bandwidth test), so the memory type of its buffers is a suspect: a non-cacheable access never uses the system cache.
++ * The CPU maps the same pages write-combined (SweetAccelerator): a cacheable GPU view may read stale lines, so this is an experiment.
++ */
++static uint64_t g6_pte_attr;
++
+ /* 4 KiB pages (AP=01, non-cacheable, inner shareable) at iova -> pa, physically contiguous. */
+ static bool
+ g6_map(uint64_t iova, uint64_t pa, uint64_t size)
+@@ -976,7 +983,7 @@
+ 			printf("SWEET GPU615: map: no page table for %#llx\n", (unsigned long long)va);
+ 			return false;
+ 		}
+-		g6_pw64(l3 + 8ull * ((va >> 12) & 0x1ff), (pa + o) | (1u << 10) | (3u << 8) | (1u << 6) | 3u);
++		g6_pw64(l3 + 8ull * ((va >> 12) & 0x1ff), (pa + o) | (g6_pte_attr << 2) | (1u << 10) | (3u << 8) | (1u << 6) | 3u);
+ 	}
+ 	return true;
+ }
+@@ -1134,7 +1141,7 @@
+ 				break;
+ 			}
+ 			g6_pw64(l3 + 8ull * ((va >> 12) & 0x1ff),
+-			    (pages[i] + 0x1000ull * k) | (1u << 10) | (3u << 8) | (1u << 6) | 3u);
++			    (pages[i] + 0x1000ull * k) | (g6_pte_attr << 2) | (1u << 10) | (3u << 8) | (1u << 6) | 3u);
+ 		}
+ 	}
+ 	g6_tlb_flush();
+@@ -2548,6 +2555,12 @@
+ 	}
+ 	PE_parse_boot_argn("sweetgpufast", &g6_fast, sizeof(g6_fast));
+ 	PE_parse_boot_argn("sweetgputest", &g6_testsel, sizeof(g6_testsel));
++	{
++		uint32_t attr = 0;
++		if (PE_parse_boot_argn("sweetgpuattr", &attr, sizeof(attr)) && attr <= 1) {
++			g6_pte_attr = attr;
++		}
++	}
+ 	PE_parse_boot_argn("sweetgpuevent", &g6_testevent, sizeof(g6_testevent));
+ 	PE_parse_boot_argn("sweetgpuregs", &g6_testregs, sizeof(g6_testregs));
+ 	PE_parse_boot_argn("sweetgpupk", &g6_testpk, sizeof(g6_testpk));
