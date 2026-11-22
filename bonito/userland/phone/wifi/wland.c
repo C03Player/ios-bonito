@@ -1114,6 +1114,14 @@ int main(int argc, char **argv)
 		if (argc > 2)
 			sleep((unsigned)atoi(argv[2]));
 		return boot_modem() ? 1 : 0;
+	} else if (!strcmp(c, "uptest")) {
+		/* uptest WAIT NETSECS: for the launchd test job: the memory limit, a wait for the phone's own boot to settle, then the whole chain (SMMU stream, WLAN rails, SMP2P, modem, network) */
+		struct memlimit_properties ml = { 2048, 0, 2048, 0 };
+		int mrc = memorystatus_control(7, getpid(), 0, &ml, sizeof(ml));
+		printf("uptest: memory limit 2048 MB -> %d\n", mrc);
+		if (argc > 2)
+			sleep((unsigned)atoi(argv[2]));
+		return up(argc > 3 ? (unsigned)atoi(argv[3]) : 60);
 	} else if (!strcmp(c, "bcm") && argc > 3) {
 		/* a BCM (bus) vote: x = average, y = peak, in the BCM's own units (0x3fff = its top level); commit + valid */
 		uint32_t x = (uint32_t)strtoul(argv[2 + 1], NULL, 0) & 0x3fff, y = argc > 4 ? (uint32_t)strtoul(argv[4], NULL, 0) & 0x3fff : x;
