@@ -27,6 +27,8 @@
 #include <signal.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
+#include <stdarg.h>
+#include <pthread.h>
 #include <time.h>
 #include "pmem.h"
 #include "scm.h"
@@ -561,8 +563,43 @@ static int mba_start(uint64_t mba_pa)
 	return 0;
 }
 
+/* a heartbeat for the modem load: every 5 s it says what the loader is doing, so a stall names its phase (reading a file, writing a segment at an offset) */
+static char hb_phase[160] = "";
+static volatile int hb_on;
+
+static void *hb_thread(void *arg)
+{
+	uint64_t t0 = now_ms();
+	char last[160] = "";
+	while (hb_on) {
+		sleep(5);
+		if (!hb_on)
+			break;
+		char cur[160];
+		memcpy(cur, hb_phase, sizeof(cur));
+		cur[sizeof(cur) - 1] = 0;
+		printf("boot: [%llu s] still in: %s%s\n", (unsigned long long)((now_ms() - t0) / 1000), cur, strcmp(cur, last) ? "" : " (no change)");
+		memcpy(last, cur, sizeof(last));
+	}
+	return NULL;
+}
+
+static void hb(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void hb(const char *fmt, ...)
+{
+	char tmp[160];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(tmp, sizeof(tmp), fmt, ap);
+	va_end(ap);
+	memcpy(hb_phase, tmp, sizeof(tmp));
+}
+
 static int boot_modem(void)
 {
+	pthread_t hbt;
+	hb_on = 1;
+	pthread_create(&hbt, NULL, hb_thread, NULL);
 	/* 1. proxy votes as downstream (vdd_cx, vdd_mx, vdd_mss): the top levels */
 	int ncx = levels("cx.lvl", 0), nmss = levels("mss.lvl", 0);
 	uint64_t aux;
@@ -706,7 +743,10 @@ static int boot_modem(void)
 			char path[128];
 			size_t sl;
 			snprintf(path, sizeof(path), FW_DIR "/modem.b%02u", i);
+			hb("reading %s", path);
+			uint64_t rt0 = now_ms();
 			uint8_t *seg = slurp(path, &sl);
+			printf("boot:   read %s: %zu bytes in %llu ms\n", path, sl, (unsigned long long)(now_ms() - rt0));
 			if (!seg || sl < ph[i].filesz) {
 				fprintf(stderr, "boot: %s missing or short\n", path);
 				return -1;
@@ -715,6 +755,7 @@ static int boot_modem(void)
 			uint64_t want = (ph[i].filesz + 3) & ~3ull;
 			for (uint64_t o = 0; o < want; o += 0x100000) {
 				uint64_t n = want - o < 0x100000 ? want - o : 0x100000, t1 = now_ms();
+				hb("writing segment %u data +%llx (%llu bytes) to %llx", i, (unsigned long long)o, (unsigned long long)n, (unsigned long long)(pa + o));
 				if (pm_wr(pa + o, seg + o, n)) {
 					fprintf(stderr, "boot: write failed in segment %u at +%llx\n", i, (unsigned long long)o);
 					return -1;
@@ -729,6 +770,7 @@ static int boot_modem(void)
 		}
 		for (uint64_t o = (ph[i].filesz + 3) & ~3ull, zn = 0; o < ph[i].memsz; o += sizeof(zeros), zn++) {
 			uint64_t n = ph[i].memsz - o < sizeof(zeros) ? ph[i].memsz - o : sizeof(zeros), t1 = now_ms();
+			hb("zero-filling segment %u +%llx to %llx", i, (unsigned long long)o, (unsigned long long)(pa + o));
 			if (pm_wr(pa + o, zeros, (n + 3) & ~3ull)) {
 				fprintf(stderr, "boot: zero fill failed in segment %u at +%llx\n", i, (unsigned long long)o);
 				return -1;
@@ -742,6 +784,7 @@ static int boot_modem(void)
 			wr32(RMB + RMB_MBA_COMMAND, 2);	/* CMD_LOAD_READY */
 		}
 		img_length += ph[i].memsz;
+		hb("announcing segment %u to the MBA (length %u)", i, img_length);
 		wr32(RMB + RMB_PMI_LENGTH, img_length);
 		if ((int32_t)rd32(RMB + RMB_MBA_STATUS) < 0) {
 			fprintf(stderr, "boot: the MBA rejected segment %u\n", i);
