@@ -1,0 +1,78 @@
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -14,8 +14,10 @@
+ int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ 
+ /* Live downstream DT has two positional reg entries, no reg-names. */
+-#define RH_RSC_PA       0x18220000u
+-#define RH_TCS_PA       0x18220d00u
++/* Patch 0203: the apps RSC's DRV 2 (the flame's SM8150: 0x18220000; the bonito's SDM670: 0x179e0000, TCS offset 0xd00): sweet_rpmh_set_rsc() before the first write. */
++static uint32_t rh_rsc_pa = 0x18220000u, rh_tcs_pa = 0x18220d00u;
++#define RH_RSC_PA       rh_rsc_pa
++#define RH_TCS_PA       rh_tcs_pa
+ #define RH_TCS_SIZE     0x3000u
+ #define RH_DICT_PA      0x0c3f000cu
+ #define RH_DRV          2u
+@@ -365,6 +367,17 @@
+ 	return error;
+ }
+ 
++void sweet_rpmh_set_rsc(uint32_t rsc, uint32_t tcs);
++
++void
++sweet_rpmh_set_rsc(uint32_t rsc, uint32_t tcs)
++{
++	if (!rh_rsc) {
++		rh_rsc_pa = rsc;
++		rh_tcs_pa = tcs;
++	}
++}
++
+ int
+ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+ {
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -1997,6 +1997,32 @@
+ 	    i == 256 ? "PASS: the 2D blit copied the data" : "FAIL: the destination differs", i, got[0], got[1], got[2], got[3]);
+ }
+ 
++extern int sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values);
++extern void sweet_rpmh_set_rsc(uint32_t rsc, uint32_t tcs);
++
++/*
++ * Patch 0203: DDR (BCM "MC0") and the memory NoC ("SH0") voted to their top levels, as the Pixel 4 port does (patch 0122: ABL's level left the CPUs' bandwidth at 13.7 GB/s, 19.6 voted
++ * up). Nothing else votes them for the GPU here: a GPU copy moved 2.25 GB/s each way against about 14.9 GB/s of peak (two 16-bit LPDDR4X channels at 1866 MHz, Snapdragon 670/710).
++ * The SDM670's apps RSC DRV 2 is at 0x179e0000 (TCS 0xd00 on). A BCM command is commit | valid | x (average) | y (peak). Boot-arg sweetddr=1 turns it on (off by default for now).
++ */
++static void
++g6_bus_vote(void)
++{
++	uint32_t on = 0;                /* off until the first boot shows the RSC answers (boot-arg sweetddr=1) */
++
++	PE_parse_boot_argn("sweetddr", &on, sizeof(on));
++	if (!on) {
++		return;
++	}
++	sweet_rpmh_set_rsc(0x179e0000u, 0x179e0d00u);
++	static const char *const bcm[] = { "MC0", "SH0" };
++	for (unsigned i = 0; i < sizeof(bcm) / sizeof(bcm[0]); i++) {
++		uint32_t off = 0, val = 1u << 30 | 1u << 29 | 0x3fffu << 14 | 0x3fffu;
++		int rc = sweet_rpmh_write(bcm[i], 1, &off, &val);
++		printf("SWEET GPU615: bus vote %s top -> %d\n", bcm[i], rc);
++	}
++}
++
+ static void
+ g6_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+@@ -2007,6 +2033,7 @@
+ 	PE_parse_boot_argn("sweetgpudelay", &delay_s, sizeof(delay_s));
+ 	printf("SWEET GPU615: stage A starts in %d s\n", delay_s);
+ 	(void)tsleep(&g6_chan, PZERO, "g6wait", hz * delay_s);
++	g6_bus_vote();
+ 	printf("SWEET GPU615: step 1: GCC state (read only)\n");
+ 	g6_settle();
+ 	printf("SWEET GPU615: gcc cfg_ahb %#x memnoc %#x snoc_dvm %#x ddr_axi %#x\n", g6_rd(G6_GCC_PA + G6_GCC_CFG_AHB),
