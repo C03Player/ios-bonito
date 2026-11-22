@@ -79,3 +79,27 @@ The device tree in the stock boot image (`stock/dtbs/0.dtb`) is the base SDM670 
 (`stock/dtbo.img`, entry 8 = "Google Inc. MSM sdm670 B4 PVT v1.0": B4 = bonito, S4 = sargo; decompile with `dtc -I dtb -O dts`). Its regions: modem `0x8b000000+0x9800000`,
 video `0x94800000+0x500000`, WLAN MSA `0x94d00000+0x100000`, cdsp `0x94e00000+0x800000`, MBA `0x95600000+0x200000`, adsp `0x95800000+0x2200000`. Using the base tree's addresses put
 the MBA and the metadata inside the modem region, so the modem's own segments collided with them and the load stalled.
+
+## Results of the first bring-up runs (2026-11-22)
+
+What works on the bonito, from `wland uptest 100 120` (`bonito/userland/phone/wifi`, run as a launchd job from the phone's boot, kernel 0204+0206 with `sweetpmem=1`):
+
+- The WLAN SMMU stream is set up (apps SMMU `0x15000000`, stream `0x40` mask 1 from icnss `iommus`), the four WLAN rails (PM660 L5, L9, L6, L19) and `rfclka2` are on, the QDSS clock message is acked.
+- The modem boots through the MBA: GCC clocks, subsystem reset, boot FSM, PBL and MBA status 2, the metadata in the MBA region, `hyp_assign` of the MBA, the metadata, and the whole modem region (to the kernel and the modem's VM),
+  69 MB of segments (rate: the whole load takes about 5 s once the phone's boot has settled), status 4 "image authenticated".
+- The modem says ready 100 ms later; GLINK (`glink_ssr`, `IPCRTR`, ...) and QRTR work; rmtfs (modem_fs1, fs2, fsg, fsc; 2 MiB shared buffer), pd-mapper and TFTP serve the modem; it registers about 15 QRTR services.
+
+What still fails: about 0.9 s after "ready" the modem reports ERR-FATAL with the crash reason (SMEM item 421) `:0:[rf]EX:kernel:0:rf:171:PC=d949b6d4`, identically in every run; WLFW (QMI 0x45) is never published, so the radio never starts.
+Tried without effect: the three proxy-consumer rails (`ldoa1` 1.2 V, `ldoa11` 1.8 V, `ldob1` 0.88 V; the stock DT marks them `qcom,proxy-consumer-enable`).
+
+Pitfalls found on the way (each cost a test cycle):
+- The stock boot image's DT is the generic SDM670 one; the real memory map is in the model's dtbo overlay (see "Memory map lesson").
+- A 32-bit RMB register cannot take an address above 4 GiB (managed RAM): the MBA's metadata lives in the MBA region.
+- The per-process jetsam memory limit kills the job silently (kernel log: `CRASH wland sig 9, reason ns 1 code 0x7`): `memorystatus_control(7, ...)` first.
+- Reading the firmware during the phone's own boot is very slow (the eMMC is saturated): wait about 100 s.
+- `sweetpmem` has no effect unless `sweet_pmem_init()` is called (patch 0205: 0126 had removed it); the RPMh RSC default must be the bonito's (patch 0206).
+- After `hfsx_write.py` in the recovery, `adb shell sync` before reading back; a read in the same session may show the old data.
+
+Candidates for the RF crash, not tried: what else Android's kernel does before the modem starts (TLMM pin ownership for the RF front end, clocks the downstream driver enables for the modem such as `gcc_mss_axis2`,
+`rfclka1`, other ARC levels), the modem's missing `/readwrite/modem_efs` (the modem created nothing before it crashed), RF calibration in `modemcal`/`persist`.
+The test job has been removed from the phone's launchd.plist (and the files stay in `/private/var/local/fw`, `/private/var/local/bin/wland`).
