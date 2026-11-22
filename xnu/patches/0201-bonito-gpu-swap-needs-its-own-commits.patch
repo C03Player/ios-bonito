@@ -1,0 +1,95 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -2633,11 +2633,19 @@
+  * that wait skipped it swaps earlier, so the panel copy must not note "the newest fence" for a swap while a commit is still pending: sweet_gpu_pending() says so.
+  */
+ static int g6_pending;
++static unsigned int g6_pending_done;    /* patch 0201: commits whose submit has returned, ever */
+ 
+ int
+ sweet_gpu_pending(void)
+ {
+ 	return __atomic_load_n(&g6_pending, __ATOMIC_RELAXED);
++}
++
++/* Patch 0201: a swap needs only the commits pending when it happened: its need is (done + pending) then, it can note its fence once done has reached it. */
++unsigned int
++sweet_gpu_pending_done(void)
++{
++	return __atomic_load_n(&g6_pending_done, __ATOMIC_RELAXED);
+ }
+ 
+ static int
+@@ -2649,6 +2657,9 @@
+ 	if (error != 0 || req->newptr == USER_ADDR_NULL) {
+ 		return error;
+ 	}
++	if (delta < 0) {
++		__atomic_add_fetch(&g6_pending_done, (unsigned int)-delta, __ATOMIC_RELAXED);
++	}
+ 	int now = __atomic_add_fetch(&g6_pending, delta, __ATOMIC_RELAXED);
+ 	if (now < 0) {
+ 		__atomic_store_n(&g6_pending, 0, __ATOMIC_RELAXED);
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -51,6 +51,7 @@
+ uint32_t sweet_gpu_latest_fence(void);   /* bsd/dev/bonito_gpu.c, patch 0183: newest fence submitted */
+ int sweet_gpu_fence_done(uint32_t fence);   /* the GPU has written it */
+ int sweet_gpu_pending(void);                 /* patch 0200: commits of the render server not yet submitted */
++unsigned int sweet_gpu_pending_done(void);   /* patch 0201: commits submitted, ever */
+ vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ void delay(int usec);
+ extern int sweet_display_fit_x, sweet_display_fit_y, sweet_display_fit_w, sweet_display_fit_h;
+@@ -260,7 +261,7 @@
+ 	uint64_t            fVsyncCount;
+ 	uint64_t            fNextVsync;     /* absolute deadline of the next tick */
+ 	uint64_t            fVsyncAbs;      /* tick period in absolute time units */
+-	uint64_t            fStatSwaps, fStatPresents, fStatPresentAbs;
++	uint64_t            fStatSwaps, fStatPresents, fStatPresentAbs, fStatSnapTicks, fStatSnaps, fStatForced;
+ 
+ 	static void vsyncFired(OSObject *owner, IOTimerEventSource *sender);
+ 
+@@ -295,6 +296,7 @@
+ 		uint8_t  rec[SWEET_FB_SWAP_REC_SIZE];
+ 		uint64_t id, tick;
+ 		uint32_t fence;
++		unsigned int need;      /* patch 0201: the commits submitted ever when the frame has been submitted */
+ 		bool     snapped, used;
+ 	}             fQueue[8];
+ 	uint64_t      fSwapSeq, fShownSeq;
+@@ -473,6 +475,11 @@
+ 			    swaps, swaps / 5, (swaps * 2) % 10, fb->fStatPresents,
+ 			    fb->fStatPresents ? ns / 1000 / fb->fStatPresents : 0);
+ 		}
++		if (fb->fStatSnaps) {
++			IOLog("SWEET FB: 5s: %llu fences noted after %llu.%llu ticks on average, %llu forced by the timeout\n", fb->fStatSnaps, fb->fStatSnapTicks / fb->fStatSnaps,
++			    (fb->fStatSnapTicks * 10 / fb->fStatSnaps) % 10, fb->fStatForced);
++		}
++		fb->fStatSnaps = fb->fStatSnapTicks = fb->fStatForced = 0;
+ 		fb->fStatSwaps = sweet_fb_swap_count;
+ 		fb->fStatPresents = 0;
+ 		fb->fStatPresentAbs = 0;
+@@ -522,7 +529,12 @@
+ 	SwapEntry *pick = NULL;
+ 	for (int qi = 0; qi < 8; qi++) {
+ 		SwapEntry *e = &fb->fQueue[qi];
+-		if (e->used && !e->snapped && ((count >= e->tick + 2 && sweet_gpu_pending() == 0) || count >= e->tick + 14)) {      /* patch 0200: not while a commit is still being submitted */
++		if (e->used && !e->snapped && ((count >= e->tick + 2 && (int)(sweet_gpu_pending_done() - e->need) >= 0) || count >= e->tick + 14)) {      /* patch 0201: once the commits pending at its swap are submitted */
++			fb->fStatSnaps++;
++			fb->fStatSnapTicks += count - e->tick;
++			if ((int)(sweet_gpu_pending_done() - e->need) < 0) {
++				fb->fStatForced++;
++			}
+ 			e->fence = newest;
+ 			e->snapped = true;
+ 		}
+@@ -631,6 +643,7 @@
+ 		memcpy(e->rec, rec, SWEET_FB_SWAP_REC_SIZE);
+ 		e->id = ++fSwapSeq;
+ 		e->tick = fVsyncCount;
++		e->need = sweet_gpu_pending_done() + (unsigned int)sweet_gpu_pending();
+ 		e->snapped = false;
+ 		e->used = true;
+ 	}
