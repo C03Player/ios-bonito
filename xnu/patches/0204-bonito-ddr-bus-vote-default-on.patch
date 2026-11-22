@@ -1,0 +1,18 @@
+diff --git a/bsd/dev/bonito_gpu.c b/bsd/dev/bonito_gpu.c
+--- a/bsd/dev/bonito_gpu.c
++++ b/bsd/dev/bonito_gpu.c
+@@ -2003,12 +2003,12 @@
+ /*
+  * Patch 0203: DDR (BCM "MC0") and the memory NoC ("SH0") voted to their top levels, as the Pixel 4 port does (patch 0122: ABL's level left the CPUs' bandwidth at 13.7 GB/s, 19.6 voted
+  * up). Nothing else votes them for the GPU here: a GPU copy moved 2.25 GB/s each way against about 14.9 GB/s of peak (two 16-bit LPDDR4X channels at 1866 MHz, Snapdragon 670/710).
+- * The SDM670's apps RSC DRV 2 is at 0x179e0000 (TCS 0xd00 on). A BCM command is commit | valid | x (average) | y (peak). Boot-arg sweetddr=1 turns it on (off by default for now).
++ * The SDM670's apps RSC DRV 2 is at 0x179e0000 (TCS 0xd00 on). A BCM command is commit | valid | x (average) | y (peak). Boot-arg sweetddr=0 leaves them alone.
+  */
+ static void
+ g6_bus_vote(void)
+ {
+-	uint32_t on = 0;                /* off until the first boot shows the RSC answers (boot-arg sweetddr=1) */
++	uint32_t on = 1;                /* patch 0204: on by default (boot-arg sweetddr=0 leaves them alone): the RSC answers and a gesture run moved 1444 command buffers against 828 */
+ 
+ 	PE_parse_boot_argn("sweetddr", &on, sizeof(on));
+ 	if (!on) {
