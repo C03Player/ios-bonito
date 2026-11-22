@@ -668,6 +668,26 @@ static int boot_modem(void)
 	}
 	printf("boot: MBA authenticated the headers\n");
 
+	/* the whole modem region to the kernel AND the modem's VM before any segment is written (downstream pil_assign_mem_to_subsys_and_linux, region = lowest segment start to
+	 * highest segment end): without it the first large write stalled the bus */
+	{
+		uint64_t rs = ~0ull, re = 0;
+		for (uint32_t i = 0; i < phnum; i++) {
+			if (ph[i].type != 1 || (int)i == hash || !ph[i].memsz)
+				continue;
+			if (ph[i].paddr < rs)
+				rs = ph[i].paddr;
+			if ((uint64_t)ph[i].paddr + ph[i].memsz > re)
+				re = (uint64_t)ph[i].paddr + ph[i].memsz;
+		}
+		rs &= ~0xfffull;
+		re = (re + 0xfff) & ~0xfffull;
+		const uint32_t hlos[1] = { VMID_HLOS }, both[2] = { VMID_HLOS, VMID_MSS_MSA };
+		printf("boot: modem region %llx-%llx to the kernel and the modem's VM\n", (unsigned long long)rs, (unsigned long long)re);
+		if (hyp_assign(rs, re - rs, hlos, 1, both, 2))
+			return -1;
+	}
+
 	/* 5. the segments at their addresses, each announced to the MBA as it is loaded (pil_msa_mba_verify_blob) */
 	uint64_t total = 0;
 	static uint8_t zeros[0x10000];
