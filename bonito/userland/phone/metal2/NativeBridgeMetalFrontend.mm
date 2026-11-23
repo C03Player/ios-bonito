@@ -538,7 +538,13 @@ static std::string quartzCoreCallers();
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name {
  const uint64_t functionBegan=nowUs();
  NmbFunction *handle=name?nmb_function_new(_handle,name.UTF8String):nullptr;gTimeFunction.add(functionBegan);
- if(!handle)return nil;
+ if(!handle) {
+  // Silent until 2026-11-23: QuartzCore then logs "vertexFunction is not a MTLFunction" (98+98 a run in backboardd) without saying which function. Each missing name once.
+  static NSMutableSet *seen;static dispatch_once_t once;dispatch_once(&once,^{seen=[NSMutableSet set];});
+  NSString *key=name?:@"(nil)";bool fresh;@synchronized(seen){fresh=![seen containsObject:key];if(fresh)[seen addObject:key];}
+  if(fresh)NBLOG(@"native-metal: function %@ not made (library of %u functions): %@ | %s",key,(unsigned)nmb_library_function_count(_handle),lastError(),quartzCoreCallers().c_str());
+  return nil;
+ }
  NBFunction *function=[NBFunction new];function.handle=handle;function.name=name;function.functionType=(MTLFunctionType)nmb_function_type(handle);
  return (id<MTLFunction>)function;
 }
@@ -1614,7 +1620,11 @@ static char sweetMemoryOwnerKey;
  const uint64_t libraryBegan=nowUs();
  NmbLibrary *handle=nmb_library_new(gDevice,bytes,size,false);(void)mapped;gTimeLibrary.add(libraryBegan);
  if(!handle)return failWith<id<MTLLibrary>>(error,@"library",nil);
- NBLibrary *library=[NBLibrary new];library.handle=handle;if(error)*error=nil;return (id<MTLLibrary>)library;
+ NBLibrary *library=[NBLibrary new];library.handle=handle;if(error)*error=nil;
+ {static int shown;if(shown<8){shown++;const uint32_t n=nmb_library_function_count(handle);NSMutableString *names=[NSMutableString string];
+   for(uint32_t i=0;i<n&&i<10;i++){char nm[256];nmb_library_function_name(handle,i,nm,sizeof nm);[names appendFormat:@"%s ",nm];}
+   NBLOG(@"native-metal: library #%d from data: %zu bytes, %u functions: %@%@",shown,size,n,names,n>10?@"...":@"");}}
+ return (id<MTLLibrary>)library;
 }
 - (id<MTLLibrary>)newLibraryWithFile:(NSString *)path error:(NSError **)error {
  NSData *bytes=path?[NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:error]:nil;if(!bytes)return nil;
