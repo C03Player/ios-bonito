@@ -470,6 +470,26 @@ static uint64_t constantBytes(uint64_t type) {
  }
 }
 static std::string quartzCoreCallers();
+// Diagnostic (2026-11-23): Metal's own setVertexFunction:/setFragmentFunction: of the pipeline descriptor print "vertexFunction is not a MTLFunction." (98 + 98 a run in
+// backboardd) without saying what they were given. Log, once per distinct class/name, every value that does not conform (nil included) and who asked.
+static IMP gOrigSetVertex,gOrigSetFragment;
+static void nbNoteBadFunction(const char *which,id f) {
+ static NSMutableSet *seen;static dispatch_once_t once;dispatch_once(&once,^{seen=[NSMutableSet set];});
+ NSString *name=@"";if(f&&[f respondsToSelector:@selector(name)])name=[f name]?:@"";
+ NSString *key=[NSString stringWithFormat:@"%s|%s|%@",which,f?object_getClassName(f):"nil",name];
+ bool fresh;@synchronized(seen){fresh=![seen containsObject:key];if(fresh)[seen addObject:key];}
+ if(fresh)NBLOG(@"native-metal: %s given %s name \"%@\" conforms to MTLFunction: %s | %s",which,f?object_getClassName(f):"nil",name,
+                f&&[f conformsToProtocol:@protocol(MTLFunction)]?"yes":"no",quartzCoreCallers().c_str());
+}
+static void nbSetVertex(id self,SEL cmd,id f) {if(!f||![f conformsToProtocol:@protocol(MTLFunction)])nbNoteBadFunction("vertexFunction",f);((void(*)(id,SEL,id))gOrigSetVertex)(self,cmd,f);}
+static void nbSetFragment(id self,SEL cmd,id f) {if(!f||![f conformsToProtocol:@protocol(MTLFunction)])nbNoteBadFunction("fragmentFunction",f);((void(*)(id,SEL,id))gOrigSetFragment)(self,cmd,f);}
+static void installFunctionHooks() {
+ Class c=objc_getClass("MTLRenderPipelineDescriptorInternal");
+ if(!c){NBLOG(@"native-metal: MTLRenderPipelineDescriptorInternal missing: no function setter hooks");return;}
+ if(Method m=class_getInstanceMethod(c,@selector(setVertexFunction:)))gOrigSetVertex=method_setImplementation(m,(IMP)nbSetVertex);
+ if(Method m=class_getInstanceMethod(c,@selector(setFragmentFunction:)))gOrigSetFragment=method_setImplementation(m,(IMP)nbSetFragment);
+ NBLOG(@"native-metal: function setter hooks %s",(gOrigSetVertex&&gOrigSetFragment)?"installed":"incomplete");
+}
 @implementation NBLibrary
 - (void)dealloc {nmb_library_release(_handle);}
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values error:(NSError **)error {
@@ -1631,7 +1651,11 @@ static char sweetMemoryOwnerKey;
  const uint64_t libraryBegan=nowUs();
  NmbLibrary *handle=nmb_library_new(gDevice,bytes.bytes,bytes.length,false);gTimeLibrary.add(libraryBegan);
  if(!handle)return failWith<id<MTLLibrary>>(error,@"library",nil);
- NBLibrary *library=[NBLibrary new];library.handle=handle;if(error)*error=nil;return (id<MTLLibrary>)library;
+ NBLibrary *library=[NBLibrary new];library.handle=handle;if(error)*error=nil;
+ {static int shown;if(shown<8){shown++;const uint32_t n=nmb_library_function_count(handle);NSMutableString *names=[NSMutableString string];
+   for(uint32_t i=0;i<n&&i<10;i++){char nm[256];nmb_library_function_name(handle,i,nm,sizeof nm);[names appendFormat:@"%s ",nm];}
+   NBLOG(@"native-metal: library #%d from file %@: %lu bytes, %u functions: %@%@",shown,path.lastPathComponent,(unsigned long)bytes.length,n,names,n>10?@"...":@"");}}
+ return (id<MTLLibrary>)library;
 }
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)error {
  if(!url.isFileURL){if(error)*error=nbError(@"a file URL is required");return nil;}
@@ -1800,6 +1824,7 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
  // MTLTextureImplementation." on every miss (~600 lines/s from backboardd while scrolling).
  {Protocol *tp=objc_getProtocol("MTLTextureImplementation");if(tp)class_addProtocol([NBTexture class],tp);
   NBLOG(@"native-metal: MTLTextureImplementation %s",tp?([NBTexture conformsToProtocol:tp]?"adopted":"not adopted"):"missing");}
+ installFunctionHooks();
  objc_registerClassPair(cls);
  gDeviceObject=[cls new];
  return gDeviceObject;
