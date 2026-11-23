@@ -37,6 +37,7 @@
 #include "rmtfs.h"
 #include "pdmapper.h"
 #include "tftp.h"
+#include "memshare.h"
 #include "wlfw.h"
 #include "radio.h"
 #include "ipnet.h"
@@ -1108,6 +1109,10 @@ static void net_cb(const struct qrtr_hdr *h, const uint8_t *d, uint32_t n)
 			pdmapper_handle(h, d, n);
 			return;
 		}
+		if (h->dst_port == MEMSHARE_PORT) {
+			memshare_handle(h, d, n);
+			return;
+		}
 		if (h->dst_port == TFTP_PORT || (h->dst_port >= TFTP_XFER_PORT0 && h->dst_port < TFTP_XFER_PORT0 + TFTP_XFERS)) {
 			tftp_handle(h, d, n);
 			return;
@@ -1231,6 +1236,8 @@ static int net(unsigned secs)
 		printf("net: no rmtfs\n");
 	if (pdmapper_init() || tftp_init())
 		printf("net: no pd-mapper/tftp\n");
+	if (memshare_init())
+		printf("net: no memshare\n");
 	read_conf();
 	uint64_t end = link_ms() + (uint64_t)secs * 1000, stats = link_ms() + 30000;
 	while (!secs || link_ms() < end) {
