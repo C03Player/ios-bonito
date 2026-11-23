@@ -248,12 +248,16 @@ int wlfw_start(void)
 		fw_ready = 1;
 
 	if (!fw_ready) {
-		if (!getenv("WLFW_NO_HOSTCAP")) {	/* downstream icnss never sends it */
+		/*
+		 * Downstream icnss never sends it (the healthy Android boot goes IND_REGISTER, MSA_INFO, MSA_READY), and this firmware answers it with MALFORMED_MSG:
+		 * only with WLFW_HOSTCAP=1, and then a refusal is not fatal.
+		 */
+		if (getenv("WLFW_HOSTCAP")) {
 			qmi_start(&q, QMI_REQUEST, 0, HOST_CAP);
 			qmi_tlv_u32(&q, 0x10, 0);	/* daemon_support */
 			int e = request(&q, &r, 5000);
-			if (e && e != 0x5e)		/* QMI_ERR_NOT_SUPPORTED: older firmware */
-				return -1;
+			if (e)
+				printf("wlfw: host capabilities refused (error %d), going on\n", e);
 		}
 
 		qmi_start(&q, QMI_REQUEST, 0, MSA_INFO);
