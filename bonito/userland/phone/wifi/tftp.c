@@ -29,6 +29,7 @@ static struct xfer {
 	uint64_t seek, rsize, size;	/* rsize 0: to the end */
 	uint32_t last_sent;		/* block number */
 	int done;
+	uint64_t sent_at;		/* link_ms() when the last window went out */
 	int pending;			/* an ACK that came in while a window was going out */
 	uint16_t pending_blk;
 } xf[TFTP_XFERS];
@@ -91,8 +92,13 @@ static uint32_t send_block(int i, uint32_t blk)
 static void send_window(int i, uint32_t acked)
 {
 	struct xfer *x = &xf[i];
+	/* a block bigger than the modem's reusable intents needs a one-shot intent of its own: get the window's worth with one round trip */
+	uint32_t pkt = 32 + ((4 + x->blksize + 3) & ~3u);	/* QRTR header, TFTP header, data */
+	if (pkt > 1100)
+		link_want_intents(pkt, (int)x->wsize);
 	for (uint32_t k = 0; k < x->wsize && !x->done; k++)
 		send_block(i, acked + 1 + k);
+	x->sent_at = link_ms();
 }
 
 static int open_path(const char *path, int write)
@@ -245,8 +251,14 @@ void tftp_handle(const struct qrtr_hdr *h, const uint8_t *d, uint32_t n)
 		} else {
 			/* the window's end, or a repeated ACK (client timeout): go on from the block after it */
 			uint32_t acked = x->last_sent - (uint16_t)(x->last_sent - blk);	/* 16-bit block numbers */
-			if (acked != x->last_sent)
+			if (acked != x->last_sent) {
+				/* an ACK for an earlier window right after we sent the next one is the client's timeout firing before our blocks arrived: not a loss */
+				if (link_ms() - x->sent_at < 150) {
+					in_window = 0;
+					return;
+				}
 				printf("tftp: resend after block %u (sent %u)\n", acked, x->last_sent);
+			}
 			x->done = 0;
 			send_window(i, acked);
 		}

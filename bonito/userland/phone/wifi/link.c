@@ -135,6 +135,13 @@ static int rx_one(void)
 			glink_rx_peek(pr, 8 + i * 8, 8);
 			if (verbose_link > 1)
 				LOG("glink: < INTENT rcid %u size %u iid %u\n", p1, pr[0], pr[1]);
+			{
+				static int shown;
+				if (shown < 12 && p1 == rcid) {
+					shown++;
+					printf("glink: modem intent: size %u iid %u\n", pr[0], pr[1]);
+				}
+			}
 			if (p1 == rcid && opened_by_remote && nrintent < MAX_RINTENTS) {	/* intent ids are per channel */
 				rintent[nrintent].size = pr[0];
 				rintent[nrintent].iid = pr[1];
@@ -263,6 +270,36 @@ static int find_intent(uint32_t len)
 		if (!rintent[i].busy && rintent[i].size >= len && (best < 0 || rintent[i].size < rintent[best].size))
 			best = i;
 	return best;
+}
+
+/*
+ * Have n idle remote intents of at least len bytes ready: the missing ones are all requested at once (a request is answered with one intent of exactly the
+ * requested size, the modem queues them independently), instead of one round trip of ~25 ms per packet. Waits at most 300 ms.
+ */
+int link_want_intents(uint32_t len, int n)
+{
+	int have = 0;
+	for (int i = 0; i < nrintent; i++)
+		if (!rintent[i].busy && rintent[i].size >= len)
+			have++;
+	if (have >= n)
+		return 0;
+	for (int k = have; k < n; k++) {
+		link_stats[2]++;
+		glink_send(GLINK_CMD_RX_INTENT_REQ, LCID, len, NULL, 0);
+	}
+	uint64_t start = now_ms();
+	while (now_ms() - start < 300) {
+		have = 0;
+		for (int i = 0; i < nrintent; i++)
+			if (!rintent[i].busy && rintent[i].size >= len)
+				have++;
+		if (have >= n)
+			break;
+		link_poll(1);
+	}
+	link_stats[3] += (unsigned)(now_ms() - start);
+	return have >= n ? 0 : -1;
 }
 
 /* One packet into one of the modem's intents (requested if none fits), in chunks of 8K as Linux does. */
