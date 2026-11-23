@@ -218,10 +218,36 @@ static void wr_name(uint64_t pa, const char *name)
 
 static uint64_t smp2p_out_pa;
 
+/*
+ * modemsmem (downstream drivers/soc/qcom/modemsmem/modemsmem.c): at probe the AP kernel allocates SMEM item 134 (SMEM_ID_VENDOR0, 32 bytes, any host) and fills it with the
+ * board identity for the modem: version, modem_flag (CDT cdb2, 0 here), major_id, minor_id, subtype, platform (socinfo), efs_magic, ftm_magic (0 outside factory mode).
+ * This phone's values (read from the stock kernel's sysfs, modemsmem/modem_smem): version 0, flag 0, major 3, minor 0x28, subtype 1, platform 5, magics 0 (the CDT hwid
+ * 0x05032801). Linux does this long before the modem starts; without it the modem has no hardware identity to choose its configuration from.
+ */
+static void modemsmem_publish(void)
+{
+	static const uint32_t v[8] = { 0, 0, 3, 0x28, 1, 5, 0, 0 };
+	uint64_t pa;
+	if (smem_alloc(SMEM_HOST_GLOBAL, 134, sizeof(v), &pa)) {
+		fprintf(stderr, "modemsmem: cannot allocate SMEM item 134\n");
+		return;
+	}
+	printf("modemsmem: item 134 at %llx was:", (unsigned long long)pa);
+	for (int i = 0; i < 8; i++)
+		printf(" %x", rd32(pa + 4 * i));
+	for (int i = 0; i < 8; i++)
+		wr32(pa + 4 * i, v[i]);
+	printf(" -> now:");
+	for (int i = 0; i < 8; i++)
+		printf(" %x", rd32(pa + 4 * i));
+	printf("\n");
+}
+
 /* Our outbound item (Linux allocates it at probe, before the modem boots: the modem needs it). */
 static int smp2p_create(void)
 {
 	uint64_t pa;
+	modemsmem_publish();
 	if (smem_alloc(SMEM_HOST_MODEM, SMP2P_OUT, 20 + 16 * 20, &pa)) {
 		fprintf(stderr, "smp2p: cannot allocate item %u\n", SMP2P_OUT);
 		return -1;
