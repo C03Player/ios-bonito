@@ -308,6 +308,7 @@ static void dump_crash_reason(void)
 static uint64_t now_ms(void);
 static void verify_modem_image(void);
 static void dump_minidump(void);
+static void dump_modem_ddr(void);
 
 static void dump_crash_memory(void)
 {
@@ -370,6 +371,7 @@ static void smp2p_service(void)
 			dump_minidump();
 			verify_modem_image();
 			dump_crash_memory();
+			dump_modem_ddr();
 		}
 		modem_state = v;
 	}
@@ -487,6 +489,34 @@ static uint8_t *slurp(const char *path, size_t *len)
 }
 
 struct phdr { uint32_t type, offset, vaddr, paddr, filesz, memsz, flags, align; };
+
+/*
+ * After ERR-FATAL: the whole modem region (152 MiB) to /var/local/modem-ddr.bin, for offline analysis (page tables, the paged code, thread control blocks).
+ */
+static void dump_modem_ddr(void)
+{
+	static uint8_t chunk[0x100000];
+	uint64_t t0 = now_ms();
+	FILE *f = fopen("/var/local/modem-ddr.bin", "wb");
+	if (!f) {
+		printf("ddr dump: cannot create /var/local/modem-ddr.bin\n");
+		return;
+	}
+	uint64_t bad = 0;
+	for (uint64_t o = 0; o < MPSS_SIZE; o += sizeof(chunk)) {
+		uint64_t n = MPSS_SIZE - o < sizeof(chunk) ? MPSS_SIZE - o : sizeof(chunk);
+		if (pm_rd(MPSS_PA + o, chunk, n)) {
+			memset(chunk, 0xee, n);
+			bad++;
+		}
+		if (fwrite(chunk, 1, n, f) != n) {
+			printf("ddr dump: write failed at +%llx\n", (unsigned long long)o);
+			break;
+		}
+	}
+	fclose(f);
+	printf("ddr dump: modem region saved to /var/local/modem-ddr.bin in %llu ms (%llu unreadable chunks)\n", (unsigned long long)(now_ms() - t0), (unsigned long long)bad);
+}
 
 /*
  * After ERR-FATAL: the minidump table (SMEM item 602, Linux qcom_minidump) lists, per subsystem, an array of regions the crashed modem registered (its registers, TLB, ...)
