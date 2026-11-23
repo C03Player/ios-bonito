@@ -5,8 +5,11 @@ Normally every test boots through `fastboot boot` from the PC. Slot B can boot t
 ## How it is set up
 
 - Slot A keeps the Linux recovery (`boot_a`): all the tools (`adb`, `hfsx_write.py`, `ci-cycle.sh`, ...) use it. It is never changed.
-- Slot B (`boot_b`) holds the iOS boot image built for use by hand (`AUTORESET= bonito/tools/mkios.sh KERNEL NAME "sweeths200=6 sweetpmem=1"`: no timed reset,
-  no panic reset, no watchdog). The finished image is `/usb/work/standalone/ios-standalone.img` (kernel run 45029003673).
+- Slot B (`boot_b`) holds the iOS boot image for standalone use: `bonito/tools/mkios.sh KERNEL ios-standalone2 "sweetpmem=1"`, i.e. the default eMMC mode, the
+  panic reset (`sweetpanicreset=1`) and the watchdog (`sweetwdt=25`) on, and no timed reset. The finished image is `/usb/work/standalone/ios-standalone2.img`
+  (kernel run 45029003673). **Do not add `sweeths200=6`** (the "fast eMMC mode" that `boot-manual.sh` defaults to): on this phone HS200 throws read errors, a failed read of a
+  code page kills launchd (SIGBUS) and the kernel panics ("initproc exited -- exit reason namespace 2 subcode 0xa", about 150 `SWEET EMMC ... failed` lines before it);
+  the first standalone image had it and panicked within minutes.
 - `dtbo_b` and `vbmeta_b` are copies of slot A's (`/usb/work/standalone/dtbo_a.img`, `vbmeta_a.img`); the originals of everything that was in slot B are in
   `/usb/work/standalone/backup-b/`.
 - Slot B's firmware (`xbl`, `xbl_config`, `abl`, `aop`, `tz`, `hyp`, `keymaster`, `devcfg`, `qupfw`, `msadp`, `apdp`, `cmnlib`, `cmnlib64`, `bluetooth`) is
@@ -35,5 +38,12 @@ Never write firmware partitions, never edit the GPT, never touch slot A. Only `f
 
 ## Verified
 
-A self-rebooting variant (`sweetreboot=60`) booted from slot B three times with no PC involved (about 200 s), the iOS log (`logs/standalone-b.txt`) shows the shim,
-launchd's boot tasks and the 60 s timed reset, and the phone ended in fastboot with slot B out of retries.
+The corrected image booted from slot B with no PC involved and ran for at least 137 s with no eMMC error and no panic (log read from the raw ring, see below). Slot B
+then showed "no valid slot to boot" because its 3 boot attempts were used up (every power cycle by hand counts as one). The panics of the HS200 image are kept in
+`logs/recovered-user-panic-1.txt` / `-2.txt` and `logs/standalone-b.txt`.
+
+## Reading the iOS log without destroying it
+
+The persistent log is the last 4 MiB (+1 block) of the userdata partition, rewritten from offset 0 by every iOS boot: boot nothing else before pulling it.
+`bonito/tools/sweet-log-pull.py` reads the newest boot; the whole ring (older boots' tails survive beyond the newest boot's length) can be copied with
+`ums.UMS` / `ums.gpt` from the recovery (see the script) and searched for `panic(cpu`.
