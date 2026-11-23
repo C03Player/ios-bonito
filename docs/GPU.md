@@ -492,3 +492,12 @@ both votes completed with return code 0). Patch 0204 makes it the default (boot-
 One boot with the vote: 1444 command buffers in the run against 828, commit to complete 131 ms against 168. The things tried before it (separate submit thread, early release of
 waitUntilScheduled, a render area limited to the drawn bounds, Turnip's default render mode, write-back GPU mapping `sweetgpuattr=1`) moved nothing beyond the boot-to-boot spread.
 
+## 2026-11-23: the default DDR/bus vote (0204) makes the screen show rectangles of other parts of the frame
+
+The user's hands-on boot of the standalone image (kernel 45029003673, which has patch 0204's DDR/NoC vote on by default) showed, only while things move, rectangles that hold other
+parts of the frame (not stale-frame blocks). The automated gesture run on that kernel looked clean (0 blocks in 16 snapshots, no hang, 16.4 swaps/s, 12.0 panel copies/s: the
+detector reads the panel memory, not the glass, and does not see this). The same kernel booted by hand with `sweetddr=0` (vote off) is fixed on the user's screen. The last kernel
+the user judged hands-on was 0197 (before the vote); the vote is the only default that changed since. Cost: the vote is what made the GPU faster (gesture run 16.4 swaps/s against about 10
+without), so the cause is probably a timing/coherency hazard between the faster GPU and the panel copy (or the SH0 shared-memory vote), not the vote itself. Standalone images use `sweetddr=0`.
+Open: find the hazard and make the vote safe, or make `sweetddr=0` the default (patch 0204's `on = 1`).
+
