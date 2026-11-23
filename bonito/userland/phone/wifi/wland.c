@@ -307,6 +307,7 @@ static void dump_crash_reason(void)
  */
 static uint64_t now_ms(void);
 static void verify_modem_image(void);
+static void dump_minidump(void);
 
 static void dump_crash_memory(void)
 {
@@ -366,6 +367,7 @@ static void smp2p_service(void)
 		       v & 4 ? " handover" : "", v & 8 ? " stop-ack" : "");
 		if ((v & 1) && !(modem_state != 0xffffffff && (modem_state & 1))) {
 			dump_crash_reason();
+			dump_minidump();
 			verify_modem_image();
 			dump_crash_memory();
 		}
@@ -485,6 +487,63 @@ static uint8_t *slurp(const char *path, size_t *len)
 }
 
 struct phdr { uint32_t type, offset, vaddr, paddr, filesz, memsz, flags, align; };
+
+/*
+ * After ERR-FATAL: the minidump table (SMEM item 602, Linux qcom_minidump) lists, per subsystem, an array of regions the crashed modem registered (its registers, TLB, ...)
+ * at a physical address. The layout is not relied on: save the raw table to /var/local/modem-md-toc.bin, then every word pair in it that looks like a DDR physical
+ * address gets 4 KiB saved (modem-md-ptr-N.bin, up to 8) to be read in the recovery.
+ */
+static void dump_minidump(void)
+{
+	uint64_t pa;
+	uint32_t sz;
+	if (smem_get(SMEM_HOST_GLOBAL, 602, &pa, &sz) && smem_get(SMEM_HOST_MODEM, 602, &pa, &sz)) {
+		printf("minidump: smem item 602 not found\n");
+		return;
+	}
+	static uint8_t toc[0x4000];
+	uint32_t n = sz < sizeof(toc) ? sz : (uint32_t)sizeof(toc);
+	for (uint32_t o = 0; o < n; o += 4) {
+		uint32_t w = rd32(pa + o);
+		memcpy(toc + o, &w, 4);
+	}
+	printf("minidump: smem item 602 at %llx, %u bytes; first words:", (unsigned long long)pa, sz);
+	for (uint32_t o = 0; o < 96 && o < n; o += 4) {
+		uint32_t w;
+		memcpy(&w, toc + o, 4);
+		printf(" %08x", w);
+	}
+	printf("\n");
+	FILE *f = fopen("/var/local/modem-md-toc.bin", "wb");
+	if (f) {
+		fwrite(toc, 1, n, f);
+		fclose(f);
+	}
+	int saved = 0;
+	for (uint32_t o = 0; o + 8 <= n && saved < 8; o += 4) {
+		uint32_t lo, hi;
+		memcpy(&lo, toc + o, 4);
+		memcpy(&hi, toc + o + 4, 4);
+		if (hi != 0 || lo < 0x80000000u || lo >= 0xe0000000u)
+			continue;
+		static uint8_t buf[0x1000];
+		uint64_t at = (uint64_t)lo & ~0xfffull;
+		char path[64];
+		snprintf(path, sizeof(path), "/var/local/modem-md-ptr-%d.bin", saved);
+		if (pm_rd(at, buf, sizeof(buf))) {
+			printf("minidump: toc +%x -> %08x unreadable\n", o, lo);
+			continue;
+		}
+		FILE *g = fopen(path, "wb");
+		if (g) {
+			fwrite(buf, 1, sizeof(buf), g);
+			fclose(g);
+		}
+		printf("minidump: toc +%x -> %08x, 4 KiB from %llx saved to %s\n", o, lo, (unsigned long long)at, path);
+		saved++;
+	}
+	printf("minidump: %d pointer target(s) saved\n", saved);
+}
 
 /*
  * After ERR-FATAL: compare what is in the modem's DDR with the segment files it was loaded from. Read-only segments (flags & 2 == 0) must be identical: a difference in
