@@ -306,6 +306,7 @@ static void dump_crash_reason(void)
  * "EX:kernel" and save 512 KiB around each hit (384 KiB before, 128 KiB after; up to 4) to /var/local/modem-crash-N.bin, to read in the recovery.
  */
 static uint64_t now_ms(void);
+static void verify_modem_image(void);
 
 static void dump_crash_memory(void)
 {
@@ -365,6 +366,7 @@ static void smp2p_service(void)
 		       v & 4 ? " handover" : "", v & 8 ? " stop-ack" : "");
 		if ((v & 1) && !(modem_state != 0xffffffff && (modem_state & 1))) {
 			dump_crash_reason();
+			verify_modem_image();
 			dump_crash_memory();
 		}
 		modem_state = v;
@@ -483,6 +485,69 @@ static uint8_t *slurp(const char *path, size_t *len)
 }
 
 struct phdr { uint32_t type, offset, vaddr, paddr, filesz, memsz, flags, align; };
+
+/*
+ * After ERR-FATAL: compare what is in the modem's DDR with the segment files it was loaded from. Read-only segments (flags & 2 == 0) must be identical: a difference in
+ * the compressed, demand-paged code (segment 16) would make a page-in fail. Writable ones differ by design (the modem has run); they are listed for the extent only.
+ */
+static void verify_modem_image(void)
+{
+	size_t mlen;
+	uint8_t *mdt = slurp(FW_DIR "/modem.mdt", &mlen);
+	if (!mdt) {
+		printf("verify: no modem.mdt\n");
+		return;
+	}
+	uint32_t phoff, phnum = 0;
+	memcpy(&phoff, mdt + 0x1c, 4);
+	memcpy(&phnum, mdt + 0x2c, 2);
+	struct phdr *ph = (struct phdr *)(mdt + phoff);
+	static uint8_t mem[0x100000];
+	uint64_t t0 = now_ms();
+	for (uint32_t i = 0; i < phnum; i++) {
+		if (ph[i].type != 1 || !ph[i].filesz || ((ph[i].flags >> 24) & 7) == 2)
+			continue;
+		char path[128];
+		size_t sl;
+		snprintf(path, sizeof(path), FW_DIR "/modem.b%02u", i);
+		uint8_t *seg = slurp(path, &sl);
+		if (!seg || sl < ph[i].filesz) {
+			printf("verify: segment %u: %s missing or short\n", i, path);
+			free(seg);
+			continue;
+		}
+		uint64_t diff = 0, first = ~0ull, last = 0, bad_read = 0;
+		for (uint64_t o = 0; o < ph[i].filesz; o += sizeof(mem)) {
+			uint64_t n = ph[i].filesz - o < sizeof(mem) ? ph[i].filesz - o : sizeof(mem);
+			uint64_t rn = (n + 3) & ~3ull;
+			if (pm_rd(ph[i].paddr + o, mem, rn)) {
+				bad_read++;
+				continue;
+			}
+			for (uint64_t k = 0; k < n; k += 4) {
+				uint32_t a, b;
+				memcpy(&a, mem + k, 4);
+				memcpy(&b, seg + o + k, 4);
+				if (a != b) {
+					diff++;
+					if (first == ~0ull)
+						first = o + k;
+					last = o + k;
+				}
+			}
+		}
+		printf("verify: segment %2u pa %llx file %8u flags %x (%s): %llu differing words", i, (unsigned long long)ph[i].paddr, ph[i].filesz, ph[i].flags & 7,
+		       (ph[i].flags & 2) ? "writable" : "READ-ONLY", (unsigned long long)diff);
+		if (diff)
+			printf(", first +%llx last +%llx", (unsigned long long)first, (unsigned long long)last);
+		if (bad_read)
+			printf(", %llu unreadable chunks", (unsigned long long)bad_read);
+		printf("\n");
+		free(seg);
+	}
+	printf("verify: done in %llu ms\n", (unsigned long long)(now_ms() - t0));
+	free(mdt);
+}
 
 /* ---- bonito modem boot: the MBA (downstream drivers/soc/qcom/pil-msa.c and pil-q6v5.c; qcom,pil-q6v55-mss, qdsp6v65-1-0 boot FSM) ---- */
 
