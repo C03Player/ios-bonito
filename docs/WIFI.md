@@ -100,6 +100,10 @@ Pitfalls found on the way (each cost a test cycle):
 - `sweetpmem` has no effect unless `sweet_pmem_init()` is called (patch 0205: 0126 had removed it); the RPMh RSC default must be the bonito's (patch 0206).
 - After `hfsx_write.py` in the recovery, `adb shell sync` before reading back; a read in the same session may show the old data.
 
+Also tried without effect: blank modem storage (all four rmtfs images zeroed on the phone, so the modem sees a never-provisioned EFS/NV/calibration): identical crash `rf:171:PC=d949b6d4`, same timing, same tftp requests. The stored (encrypted-looking) modemst/fsg data is not the cause.
+Findings on the crash address: no program header of `modem.mdt` covers `0xd949b6d4` (segment 16, va `0xc0add000`, is read-only data; the "pointers" near that address in it are a table of NV-variant descriptors, not vtables). The modem's user-PD `wlan_pd` (`modemuw.jsn`, loaded from `wlanmdsp.mbn` over tftp) is never requested before the crash.
+Pitfall: a `launchd.plist` written by `add-wland-job.py` once read back with a damaged tail (valid length, invalid bplist trailer) and iOS panicked "No service cache"; always read the plist back and parse it before booting. Restore from the stock image: `hfsx.py /usb/build/ios16-root-20H392.img cat /System/Library/xpc/launchd.plist`.
+
 Candidates for the RF crash, not tried: what else Android's kernel does before the modem starts (TLMM pin ownership for the RF front end, clocks the downstream driver enables for the modem such as `gcc_mss_axis2`,
-`rfclka1`, other ARC levels), the modem's missing `/readwrite/modem_efs` (the modem created nothing before it crashed), RF calibration in `modemcal`/`persist`.
+`rfclka1`, other ARC levels), RF calibration in `modemcal`/`persist` (the modem-side calibration partitions, separate from modemst/fsg).
 The test job has been removed from the phone's launchd.plist (and the files stay in `/private/var/local/fw`, `/private/var/local/bin/wland`).

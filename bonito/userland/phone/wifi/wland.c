@@ -303,7 +303,7 @@ static void dump_crash_reason(void)
 
 /*
  * After ERR-FATAL: the modem's error handler keeps its crash context in the modem's DDR as well (the message text and the registers beside it). Scan the modem region (152 MiB) for
- * "EX:kernel" and save 8 KiB around each hit (up to 4) to /var/local/modem-crash-N.bin, to read in the recovery.
+ * "EX:kernel" and save 512 KiB around each hit (384 KiB before, 128 KiB after; up to 4) to /var/local/modem-crash-N.bin, to read in the recovery.
  */
 static uint64_t now_ms(void);
 
@@ -321,8 +321,12 @@ static void dump_crash_memory(void)
 		for (uint64_t i = 0; i + sizeof(needle) - 1 <= n; i++) {
 			if (chunk[i] != 'E' || memcmp(chunk + i, needle, sizeof(needle) - 1))
 				continue;
-			uint64_t at = base + o + i, from = (at & ~0xfffull) - 0x1000;
-			static uint8_t buf[0x2000];
+			uint64_t at = base + o + i, from = (at & ~0xfffull) - 0x60000;
+			static uint8_t buf[0x80000];
+			if (from < base)
+				from = base;
+			if (from + sizeof(buf) > base + size)
+				from = base + size - sizeof(buf);
 			char path[64];
 			snprintf(path, sizeof(path), "/var/local/modem-crash-%d.bin", hits);
 			if (!pm_rd(from, buf, sizeof(buf))) {
@@ -332,7 +336,7 @@ static void dump_crash_memory(void)
 					fclose(f);
 				}
 			}
-			printf("crash memory: \"EX:kernel\" at %llx, 8 KiB from %llx saved to %s\n", (unsigned long long)at, (unsigned long long)from, path);
+			printf("crash memory: \"EX:kernel\" at %llx, 512 KiB from %llx saved to %s\n", (unsigned long long)at, (unsigned long long)from, path);
 			hits++;
 			i += 0xfff;
 			if (hits == 4)
