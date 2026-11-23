@@ -102,6 +102,11 @@ Pitfalls found on the way (each cost a test cycle):
 
 Also tried without effect: blank modem storage (all four rmtfs images zeroed on the phone, so the modem sees a never-provisioned EFS/NV/calibration): identical crash `rf:171:PC=d949b6d4`, same timing, same tftp requests. The stored (encrypted-looking) modemst/fsg data is not the cause.
 Findings on the crash address: no program header of `modem.mdt` covers `0xd949b6d4` (segment 16, va `0xc0add000`, is read-only data; the "pointers" near that address in it are a table of NV-variant descriptors, not vtables). The modem's user-PD `wlan_pd` (`modemuw.jsn`, loaded from `wlanmdsp.mbn` over tftp) is never requested before the crash.
+Crash-context findings (runs with `wland` dumping the modem's memory after ERR-FATAL):
+- The modem region in DDR matches the segment files for every read-only segment (`verify:` lines; one word differs at `+0x3c` of segment 2, probably a boot-time patch), including segment 16, the compressed demand-paged code. The loader and the memory path are not the cause.
+- The faulting task is `rf` (the RF command thread). The `0xd8..`/`0xd9..` range holds executable code (callback tables mix `0xc066....` and `0xd9491cc8`-style pointers), about 28 MB, probably the decompressed view of segment 16 (the modem has a `Q6zip_Clk` task); no register or TLB state was found.
+- SMEM item 602 (minidump table) has two entries, neither the modem's: one with 18 regions is the AOP (`MSGRAM`, `CODERAM`, `DATARAM`); the other points at `0x8575c018`. Reading an address outside SMEM and the modem region from the AP stalls the bus (one run hung): only read those two ranges.
+- The B4 overlay changes only the memory map for the modem (no MSS/RF properties); the code's MBA (`0x95600000`) and MSA (`0x94d00000`) match it.
 Pitfall: a `launchd.plist` written by `add-wland-job.py` once read back with a damaged tail (valid length, invalid bplist trailer) and iOS panicked "No service cache"; always read the plist back and parse it before booting. Restore from the stock image: `hfsx.py /usb/build/ios16-root-20H392.img cat /System/Library/xpc/launchd.plist`.
 
 Candidates for the RF crash, not tried: what else Android's kernel does before the modem starts (TLMM pin ownership for the RF front end, clocks the downstream driver enables for the modem such as `gcc_mss_axis2`,
