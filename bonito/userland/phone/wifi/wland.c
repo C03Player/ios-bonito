@@ -490,8 +490,7 @@ struct phdr { uint32_t type, offset, vaddr, paddr, filesz, memsz, flags, align; 
 
 /*
  * After ERR-FATAL: the minidump table (SMEM item 602, Linux qcom_minidump) lists, per subsystem, an array of regions the crashed modem registered (its registers, TLB, ...)
- * at a physical address. The layout is not relied on: save the raw table to /var/local/modem-md-toc.bin, then every word pair in it that looks like a DDR physical
- * address gets 4 KiB saved (modem-md-ptr-N.bin, up to 8) to be read in the recovery.
+ * at a physical address. The raw table is saved to /var/local/modem-md-toc.bin; regions inside the modem region are saved to modem-md-reg-N.bin (up to 24, 4 MiB each).
  */
 static void dump_minidump(void)
 {
@@ -519,30 +518,65 @@ static void dump_minidump(void)
 		fwrite(toc, 1, n, f);
 		fclose(f);
 	}
+	/* subsystem entries: 0x80 bytes from +0x50, marked 0xdeeddeed; region count at +0x10, region array pointer (u64) at +0x18; a region is 40 bytes:
+	 * name[16], seq (u64), address (u64), size (u64). Only SMEM and the modem region are read: anything else (TZ carve-outs) stalls the bus. */
 	int saved = 0;
-	for (uint32_t o = 0; o + 8 <= n && saved < 8; o += 4) {
-		uint32_t lo, hi;
-		memcpy(&lo, toc + o, 4);
-		memcpy(&hi, toc + o + 4, 4);
-		if (hi != 0 || lo < 0x80000000u || lo >= 0xe0000000u)
+	for (uint32_t e = 0x50; e + 0x20 <= n; e += 0x80) {
+		uint32_t sig, cnt, blo, bhi;
+		memcpy(&sig, toc + e, 4);
+		memcpy(&cnt, toc + e + 0x10, 4);
+		memcpy(&blo, toc + e + 0x18, 4);
+		memcpy(&bhi, toc + e + 0x1c, 4);
+		if (sig != 0xdeeddeedu)
 			continue;
-		static uint8_t buf[0x1000];
-		uint64_t at = (uint64_t)lo & ~0xfffull;
-		char path[64];
-		snprintf(path, sizeof(path), "/var/local/modem-md-ptr-%d.bin", saved);
-		if (pm_rd(at, buf, sizeof(buf))) {
-			printf("minidump: toc +%x -> %08x unreadable\n", o, lo);
+		uint64_t base = ((uint64_t)bhi << 32) | blo;
+		int in_smem = base >= 0x86000000ull && base + 40ull * cnt <= 0x86200000ull;
+		int in_mpss = base >= MPSS_PA && base + 40ull * cnt <= MPSS_PA + MPSS_SIZE;
+		printf("minidump: entry at toc +%x: %u region(s) at %llx (%s)\n", e, cnt, (unsigned long long)base, in_smem ? "smem" : in_mpss ? "modem region" : "skipped: not a readable range");
+		if ((!in_smem && !in_mpss) || cnt == 0 || cnt > 64)
+			continue;
+		static uint8_t regs[64 * 40 + 8];
+		if (in_smem) {
+			for (uint32_t o = 0; o < cnt * 40; o += 4) {
+				uint32_t w = rd32(base + o);
+				memcpy(regs + o, &w, 4);
+			}
+		} else if (pm_rd(base & ~3ull, regs, (cnt * 40 + 3) & ~3u)) {
+			printf("minidump:   region array unreadable\n");
 			continue;
 		}
-		FILE *g = fopen(path, "wb");
-		if (g) {
-			fwrite(buf, 1, sizeof(buf), g);
-			fclose(g);
+		for (uint32_t r = 0; r < cnt; r++) {
+			char name[17] = "";
+			uint64_t seq, addr, size;
+			memcpy(name, regs + r * 40, 16);
+			for (int k = 0; k < 16; k++)
+				if (name[k] && (name[k] < 32 || name[k] > 126))
+					name[k] = '?';
+			memcpy(&seq, regs + r * 40 + 16, 8);
+			memcpy(&addr, regs + r * 40 + 24, 8);
+			memcpy(&size, regs + r * 40 + 32, 8);
+			int ok = addr >= MPSS_PA && size && size <= 0x400000ull && addr + size <= MPSS_PA + MPSS_SIZE;
+			printf("minidump:   region %2u \"%s\" seq %llu addr %llx size %llx%s\n", r, name, (unsigned long long)seq, (unsigned long long)addr,
+			       (unsigned long long)size, ok ? "" : " (not saved)");
+			if (!ok || saved >= 24)
+				continue;
+			static uint8_t rb[0x400000];
+			if (pm_rd(addr & ~3ull, rb, (size + 3) & ~3ull)) {
+				printf("minidump:   region %u unreadable\n", r);
+				continue;
+			}
+			char path[64];
+			snprintf(path, sizeof(path), "/var/local/modem-md-reg-%d.bin", saved);
+			FILE *g = fopen(path, "wb");
+			if (g) {
+				fwrite(rb, 1, size, g);
+				fclose(g);
+			}
+			printf("minidump:   -> %s\n", path);
+			saved++;
 		}
-		printf("minidump: toc +%x -> %08x, 4 KiB from %llx saved to %s\n", o, lo, (unsigned long long)at, path);
-		saved++;
 	}
-	printf("minidump: %d pointer target(s) saved\n", saved);
+	printf("minidump: %d region(s) saved\n", saved);
 }
 
 /*
