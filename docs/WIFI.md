@@ -115,3 +115,20 @@ Pitfall: a `launchd.plist` written by `add-wland-job.py` once read back with a d
 Candidates for the RF crash, not tried: what else Android's kernel does before the modem starts (TLMM pin ownership for the RF front end, clocks the downstream driver enables for the modem such as `gcc_mss_axis2`,
 `rfclka1`, other ARC levels), RF calibration in `modemcal`/`persist` (the modem-side calibration partitions, separate from modemst/fsg).
 The test job has been removed from the phone's launchd.plist (and the files stay in `/private/var/local/fw`, `/private/var/local/bin/wland`).
+
+## The RF crash is solved (2026-11-23): the modem needs its board identity in SMEM
+
+Found by running the stock downstream kernel's own modem bring-up in the Linux recovery (vendor image loop-mounted from tmpfs, the real `modem_a` at `/firmware`, Android's
+`rmt_storage`, `tftp_server`, `pd-mapper`, `irsc_util`; `setprop ctl.stop sweetreboot` first) and diffing its logs (`/sys/kernel/debug/ipc_logging`, `msm_ipc_router/dump_servers`,
+`ipclog_smem`) against ours. That run is healthy: ready at +0.05 s, Power/Clock ready at +0.9 s, `wlan_pd` and the WLFW service at +1.1 s.
+
+- **Root cause:** the downstream `modemsmem` driver allocates SMEM item **134** (32 bytes, any host) and fills it with the board identity the modem uses to pick its RF card config:
+  `{version 0, modem_flag 0, major_id 3, minor_id 0x28, subtype 1, platform 5, efs_magic 0, ftm_magic 0}` (this phone, from `modemsmem/modem_smem` in sysfs; CDT hwid 0x05032801).
+  `wland` never wrote it, so the RF task dereferenced a NULL config pointer (`rf:171:PC=d949b6d4`, SSR cause 0x70 = data-read TLB miss at address 4) and the modem also asked for
+  `/boot/modem_fsg_oem_*` that Android's modem never asks for. `modemsmem_publish()` in `wland.c` (called from `smp2p_create()`) fixes it: the modem now raises handover and registers ~30 services.
+- Also matching Android: RFSA (QMI service 0x1c instance 1, `rfsa.c`, answers client 1 with the 2 MB RMTFS buffer), no memshare (a healthy router table has no 0x34; `MEMSHARE=1` re-enables it),
+  no WLFW host-capabilities request by default (this firmware answers MALFORMED_MSG; `WLFW_HOSTCAP=1`).
+- **TFTP speed:** the 3 MB `wlanmdsp.mbn` must arrive before the user-PD grace timer (~30 s). 7680-byte blocks with the window's one-shot GLINK intents requested together
+  (`link_want_intents`) take 396 blocks / ~1.6 s of intent waiting (was >40 s and a duplicate-ACK resend storm with 1 KB blocks).
+- State when the Wi-Fi work was paused: `wlfw: server at 0:51`, registered for indications; the next step in a run is MSA info/ready, capability, board data download (not reached yet).
+- Tools for the comparison: `/usb/work/android-probe/run/` (`run_probe.sh`, `phone_setup.sh`, captures in `cap/`), the full modem DDR dump `/usb/work/modem-dump/modem-ddr-wf23.bin`.
