@@ -5,9 +5,12 @@ Normally every test boots through `fastboot boot` from the PC. Slot B can boot t
 ## How it is set up
 
 - Slot A keeps the Linux recovery (`boot_a`): all the tools (`adb`, `hfsx_write.py`, `ci-cycle.sh`, ...) use it. It is never changed.
-- Slot B (`boot_b`) holds the iOS boot image for standalone use: `bonito/tools/mkios.sh KERNEL ios-standalone2 "sweetpmem=1"`, i.e. the default eMMC mode, the
-  panic reset (`sweetpanicreset=1`) and the watchdog (`sweetwdt=25`) on, and no timed reset. The finished image is `/usb/work/standalone/ios-standalone2.img`
-  (kernel run 45029003673). **Do not add `sweeths200=6`** (the "fast eMMC mode" that `boot-manual.sh` defaults to): on this phone HS200 throws read errors, a failed read of a
+- Slot B (`boot_b`) holds the iOS boot image for standalone use: `DENY=fairplayd bonito/tools/mkios.sh KERNEL ios-standalone3 "sweetgpu=6 sweetmtl=2 sweetgpudelay=5"`, i.e. the
+  GPU on (see below), the default eMMC mode, the panic reset (`sweetpanicreset=1`) and the watchdog (`sweetwdt=25`) on, and no timed reset. The finished image is
+  `/usb/work/standalone/ios-standalone3.img` (kernel run 45029003673). `DENY=fairplayd` is needed to fit the 591-character command line.
+- **The GPU needs boot-args**: the kernel's `sweetgpu` defaults to 0 (off), so without `sweetgpu=6 sweetmtl=2 sweetgpudelay=5` backboardd logs `IOAcceleratorES -> 0 found`
+  forever and nothing renders through the GPU (the first standalone images had none: "the GPU is not working"). With them: `SWEET GPU615` starts, `SWEET MTL: IOAcceleratorES
+  published (MetalPluginName SweetMetal2)`, backboardd/SpringBoard match it. `sweetpmem=1` is only for Wi-Fi and is not in the standalone image. **Do not add `sweeths200=6`** (the "fast eMMC mode" that `boot-manual.sh` defaults to): on this phone HS200 throws read errors, a failed read of a
   code page kills launchd (SIGBUS) and the kernel panics ("initproc exited -- exit reason namespace 2 subcode 0xa", about 150 `SWEET EMMC ... failed` lines before it);
   the first standalone image had it and panicked within minutes.
 - `dtbo_b` and `vbmeta_b` are copies of slot A's (`/usb/work/standalone/dtbo_a.img`, `vbmeta_a.img`); the originals of everything that was in slot B are in

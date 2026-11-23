@@ -1,7 +1,7 @@
 #!/bin/bash
 # Boot iOS from the phone itself (slot B), without the PC: see docs/STANDALONE.md.
 #
-#   bonito/tools/standalone.sh flash [IMAGE]   write the iOS boot image to boot_b (default /usb/work/standalone/ios-standalone2.img)
+#   bonito/tools/standalone.sh flash [IMAGE]   write the iOS boot image to boot_b (default /usb/work/standalone/ios-standalone3.img)
 #   bonito/tools/standalone.sh arm [--boot]    make slot B the active slot (3 boots), optionally reboot into it now
 #   bonito/tools/standalone.sh disarm          make slot A (the Linux recovery the tools use) the active slot again
 #
@@ -15,7 +15,7 @@ case "$P" in *bonito*) ;; *) echo "standalone: not a bonito ($P); stopping"; exi
 timeout 15 fastboot getvar unlocked 2>&1 | grep -q yes || { echo "standalone: bootloader is locked; stopping"; exit 2; }
 case "$CMD" in
 flash)
-	IMG=${2:-/usb/work/standalone/ios-standalone2.img}
+	IMG=${2:-/usb/work/standalone/ios-standalone3.img}
 	[ "$(stat -c %s "$IMG")" = 67108864 ] || { echo "standalone: $IMG is not a 64 MiB boot image"; exit 2; }
 	timeout 300 fastboot flash boot_b "$IMG"
 	;;
