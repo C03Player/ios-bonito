@@ -1824,6 +1824,11 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
  // MTLTextureImplementation." on every miss (~600 lines/s from backboardd while scrolling).
  {Protocol *tp=objc_getProtocol("MTLTextureImplementation");if(tp)class_addProtocol([NBTexture class],tp);
   NBLOG(@"native-metal: MTLTextureImplementation %s",tp?([NBTexture conformsToProtocol:tp]?"adopted":"not adopted"):"missing");}
+ // 2026-11-23: Metal's pipeline descriptor setters reject any function that does not CONFORM to MTLFunction ("vertexFunction is not a MTLFunction.", logged by the hooks below for
+ // std_vert1_lph, narrow_blur_*_frag_lph, single_pass_blur_3_lph, fixed_frag_lph_cph, luma_boost_lph ... in backboardd): NBFunction only had the compile-time cast, so those
+ // pipelines were built without their shaders. Adopt the protocol at runtime, as for the textures above.
+ {class_addProtocol([NBFunction class],@protocol(MTLFunction));
+  NBLOG(@"native-metal: NBFunction conforms to MTLFunction: %s",[NBFunction conformsToProtocol:@protocol(MTLFunction)]?"yes":"no");}
  installFunctionHooks();
  objc_registerClassPair(cls);
  gDeviceObject=[cls new];
