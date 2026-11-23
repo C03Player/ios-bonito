@@ -34,6 +34,16 @@ static const struct { const char *path, *file; } parts[] = {
 static int fds[NPARTS] = { -1, -1, -1, -1 };
 static uint64_t buf_pa;
 
+/* the shared buffer, for the RFSA service (rfsa.c) that tells the modem where it is */
+int rmtfs_buffer(uint64_t *pa, uint32_t *size)
+{
+	if (!buf_pa)
+		return -1;
+	*pa = buf_pa;
+	*size = BUF_SIZE;
+	return 0;
+}
+
 int rmtfs_init(void)
 {
 	for (unsigned i = 0; i < NPARTS; i++) {

@@ -5,6 +5,6 @@ set -e
 cd "$(dirname "$0")"
 ROOT=$(cd ../.. && pwd)
 mkdir -p out
-"$ROOT/work/userland/bin/ios-cc" -O2 -Wall -Wextra -Wno-unused-parameter -o out/wland wland.c smem.c pmem.c glink.c link.c qmi.c rmtfs.c pdmapper.c memshare.c tftp.c scm.c wlfw.c radio.c ipnet.c bridge.c
+"$ROOT/work/userland/bin/ios-cc" -O2 -Wall -Wextra -Wno-unused-parameter -o out/wland wland.c smem.c pmem.c glink.c link.c qmi.c rmtfs.c pdmapper.c memshare.c rfsa.c tftp.c scm.c wlfw.c radio.c ipnet.c bridge.c
 codesign -f -s - out/wland 2>/dev/null
 ls -la out/wland

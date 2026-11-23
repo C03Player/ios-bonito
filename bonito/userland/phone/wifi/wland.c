@@ -38,6 +38,7 @@
 #include "pdmapper.h"
 #include "tftp.h"
 #include "memshare.h"
+#include "rfsa.h"
 #include "wlfw.h"
 #include "radio.h"
 #include "ipnet.h"
@@ -1113,6 +1114,10 @@ static void net_cb(const struct qrtr_hdr *h, const uint8_t *d, uint32_t n)
 			memshare_handle(h, d, n);
 			return;
 		}
+		if (h->dst_port == RFSA_PORT) {
+			rfsa_handle(h, d, n);
+			return;
+		}
 		if (h->dst_port == TFTP_PORT || (h->dst_port >= TFTP_XFER_PORT0 && h->dst_port < TFTP_XFER_PORT0 + TFTP_XFERS)) {
 			tftp_handle(h, d, n);
 			return;
@@ -1236,7 +1241,10 @@ static int net(unsigned secs)
 		printf("net: no rmtfs\n");
 	if (pdmapper_init() || tftp_init())
 		printf("net: no pd-mapper/tftp\n");
-	if (memshare_init())
+	if (rfsa_init())
+		printf("net: no rfsa\n");
+	/* Android's router table has no memshare (0x34): off unless MEMSHARE=1 */
+	if (getenv("MEMSHARE") && memshare_init())
 		printf("net: no memshare\n");
 	read_conf();
 	uint64_t end = link_ms() + (uint64_t)secs * 1000, stats = link_ms() + 30000;
