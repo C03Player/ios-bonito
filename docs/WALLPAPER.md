@@ -6,7 +6,7 @@ HEIC is HEVC-compressed. A real iPhone decodes it with its video decode hardware
 returns nothing, and no other decoder is found), so every artwork layer failed and only the gradient drew. A CPU HEVC decoder behind the same interface would be the
 general fix (it would also fix HEIC photos); it has not been attempted.
 
-**Workaround.** Convert each HEIC to PNG (`convert x.HEIC x.png`, no alpha channel is lost) and write the PNG over the HEIC under the same name: ImageIO identifies
+**Workaround.** Convert each HEIC to PNG with `heif-convert x.HEIC x.png` (Debian package `libheif-examples`). Do NOT use ImageMagick's `convert`: it silently drops the HEIC alpha channel (42 of the 48 files have one), so the transparent parts of every art layer become opaque black (26% of the lock render was black) and write the PNG over the HEIC under the same name: ImageIO identifies
 the format by content, and the `.ca` asset manifests carry no hashes. Files are written with `hfsx_write.py replace` after a journal-flush boot (`set-phone-file.sh`
 pattern), each verified byte for byte (the check must `sync` and retry; the first try right after a write gave false failures). 48 files, 19 MB of HEIC. Originals:
 `/usb/work/standalone/backup-wallpaper/`. Result: the lock-screen render (`RuntimeSnapshot-lock.atx` of the poster configuration) holds the real iOS 16 artwork.
@@ -17,3 +17,5 @@ pattern), each verified byte for byte (the check must `sync` and retry; the firs
 The phone boots straight to the home screen, so the lock screen is never captured by the snapshot ring; decode the cached render instead:
 `.atx` = ASTC 4x4 1080x2160, data = last 2332800 bytes of the 'astc' chunk (file offset 0x3ffc), header `13 ab a1 5c 04 04 01` + 3-byte dims; `astcenc -dl` (Debian package `astcenc`). Tiles come out scrambled, colours are real.
 Screenshots: `seam-sweep.sh` ends on a Spotlight frame; `sweet-shot-pull.py OUT.png` in the recovery writes all frames (`OUT-s0N.png`), the early ones show the plain home screen.
+
+**Verification (2026-11-24):** after rewriting all 48 files with alpha-preserving PNGs and bumping `SnapshotsBuildVersion` (PosterBoard then rebuilds its caches), the decoded lock render shows the real iOS 16 default art with 0% black. The home screen is unchanged: a smooth blue gradient with a soft glow.
