@@ -10,9 +10,22 @@ W=logs/$NAME-lsusb.txt
 : > "$W"
 ( seen=0; start=$(date +%s)
   while true; do
-	if lsusb 2>/dev/null | grep -q -E "18d1:4eed|1209:0001"; then
+	if grep -q -i "sweet ios" /sys/bus/usb/devices/*/product 2>/dev/null; then
 		if [ $seen = 0 ]; then
-			seen=1; echo "$(( $(date +%s) - start )) s: the gadget appeared" >> "$W"; lsusb | grep -E "18d1:4eed|1209:0001" >> "$W"
+			seen=1; echo "$(( $(date +%s) - start )) s: the gadget appeared" >> "$W"; grep -l -i "sweet ios" /sys/bus/usb/devices/*/product >> "$W"; lsusb >> "$W"
+			# what the container may do with the new device node (a rootless container needs a host udev ACL: the "+" after the mode)
+			ls -la --time-style=+%T /dev/bus/usb/001/ /dev/bus/usb/002/ 2>&1 | grep -v "^total" >> "$W"
+			python3 -I - >> "$W" 2>&1 <<'PY'
+import usb.core, os
+for d in usb.core.find(find_all=True):
+    if d.idVendor in (0x18d1, 0x1209):
+        node = '/dev/bus/usb/%03d/%03d' % (d.bus, d.address)
+        try:
+            os.close(os.open(node, os.O_RDWR)); r = 'O_RDWR ok'
+        except OSError as e:
+            r = 'O_RDWR failed: %s' % e
+        print('%04x:%04x %s -> %s' % (d.idVendor, d.idProduct, node, r))
+PY
 			for i in 1 2 3; do timeout 40 python3 -I bonito/tools/usbbridge.py ping 3 >> "$W" 2>&1 && break; sleep 2; done
 		fi
 	elif [ $seen = 1 ]; then seen=0; echo "$(( $(date +%s) - start )) s: the gadget went away" >> "$W"; fi

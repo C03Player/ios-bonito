@@ -19,7 +19,7 @@ if [ ! -f "$ADT" ]; then
 	mkdir -p "$(dirname "$ADT")"
 	CANVAS=1080x2160 python3 bonito/tools/mkadt.py "$ADT" >/dev/null
 fi
-BASE="cpus=${CPUS:-8} debug=0xc serial=3 keepsyms=1 -v wdt=-1 rd=ufsroot0 ufsrw=1 rootrw=1 ufslogsecs=1 sweetusb=${USB:-0} sweetfb_noconsole=1 sweetfb_native=1 sweetsample=${SAMPLE:--} ${AUTORESET-sweetpanicreset=1 sweetwdt=25 }sweettime=$(date +%s) sweetargs=SpringBoard,UIStatusBarVisualProviderClassName,_UIStatusBarVisualProvider_Split1080 sweethide=com.apple.MobileGestalt.plist sweetdeny=${DENY:-WirelessRadioManagerd,bluetoothd,fairplayd,AegirPoster,SiriTTSSynthesizerAU,MacinTalkAUSP,KonaSynthesizer} unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1"
+BASE="cpus=${CPUS:-8} debug=0xc serial=3 keepsyms=1 -v wdt=-1 rd=ufsroot0 ufsrw=1 rootrw=1 ufslogsecs=1 sweetusb=${USB:-0} ${USB:+sweetusbpid=0x4ee1 }sweetfb_noconsole=1 sweetfb_native=1 sweetsample=${SAMPLE:--} ${AUTORESET-sweetpanicreset=1 sweetwdt=25 }sweettime=$(date +%s) sweetargs=SpringBoard,UIStatusBarVisualProviderClassName,_UIStatusBarVisualProvider_Split1080 sweethide=com.apple.MobileGestalt.plist sweetdeny=${DENY:-WirelessRadioManagerd,bluetoothd,fairplayd,AegirPoster,SiriTTSSynthesizerAU,MacinTalkAUSP,KonaSynthesizer} unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1"
 python3 bonito/tools/mkpayload.py "$KERNEL" "$ADT" "work/$NAME.payload" --gpufw /usb/work/gpufw --cmdline "$BASE $EXTRA" | tail -1
 PAYLOAD=$PWD/work/$NAME.payload bonito/shim/build.sh "$PWD/bonito/shim/out/$NAME.img" 2>&1 | grep -i "error" || true
 ls -la "bonito/shim/out/$NAME.img"

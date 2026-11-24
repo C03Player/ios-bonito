@@ -17,7 +17,7 @@ try:
 except ImportError:
     sys.exit('needs pyusb: apt-get install python3-usb')
 
-IDS = [(0x18d1, 0x4eed), (0x1209, 0x0001)]   # the gadget's USB ids: 18d1:4eed now (a vendor the host's udev gives the container access to), 1209:0001 before
+IDS = [(0x18d1, 0x4eed), (0x18d1, 0x4ee1), (0x1209, 0x0001)]   # the gadget's USB ids: 18d1:4eed now (a vendor the host's udev gives the container access to), 1209:0001 before
 VID, PID = IDS[0]
 HOST_IP, PHONE_IP = bytes([192, 168, 7, 1]), bytes([192, 168, 7, 2])
 HOST_MAC = bytes.fromhex('02005e77ee01')
