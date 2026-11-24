@@ -26,3 +26,9 @@ run `install-shell.sh`, boot with `sweetusb=2`, `python3 bonito/tools/usbbridge.
 ## First USB test (2026-11-24)
 `usb-test.sh` on kernel 45029003673: the driver reached `ud_smmu_setup()` and gave up there (`SMMU smr4 80000740 already matches 0x740`): ABL had already mapped the DWC3's stream 0x740 to context bank 2,
 and the code taken from flame (where ABL had not) treated an existing match as an error, so the device was never started and the host saw nothing. Patch 0207 reuses ABL's bank instead.
+
+## USB enumerates (2026-11-24, patches 0207-0210)
+Three fixes made the iOS kernel's USB Ethernet gadget enumerate on the host: (0208) reuse the SMMU mapping ABL already made for stream 0x740, without reading its context bank (the bank belongs to the
+hypervisor: reading it stalls the CPU, 0207 panicked); (0209) the downstream Linux bring-up order: HS PHY init first, and after the controller reset the dwc3-msm "HS-only" wrapper sequence that switches the pipe clock domain to
+the UTMI clock (the SS PHY is not running), otherwise ep0 SETEPCONFIG times out; (0210) a USB id that the dev container may open (it is rootless: only devices with a host udev ACL, such as Google's 18d1, can be opened
+read-write; 1209:0001 enumerated but got "Access denied"). `sweetusbfix` (bit 0 post-reset sequence, bit 1 PHY first, bit 2 downstream-style core reset) and `sweetusbvid` / `sweetusbpid` are boot-args.
