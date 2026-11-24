@@ -20,7 +20,7 @@ W=logs/$NAME-lsusb.txt
   done ) &
 WATCH=$!
 trap 'kill $WATCH 2>/dev/null' EXIT
-USB=2 bonito/tools/ci-cycle.sh "$KR" "$NAME" "sweetreboot=200 $EXTRA" 420 "sweet_usb"
+USB=2 bonito/tools/ci-cycle.sh "$KR" "$NAME" "sweetreboot=200 $EXTRA" 420 "${MARKER:-sweet_usb}"
 RC=$?
 kill $WATCH 2>/dev/null
 echo "--- usb watch:"; cat "$W"; [ -s "$W" ] || echo "1209:0001 never appeared on the host's USB bus"

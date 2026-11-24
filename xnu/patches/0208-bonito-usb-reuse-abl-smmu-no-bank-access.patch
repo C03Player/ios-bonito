@@ -1,0 +1,39 @@
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+index 779a2c1..0f2ee6d 100644
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -1107,28 +1107,14 @@ ud_smmu_setup(uint64_t dma_pa)
+ 		if (((UD_SMMU_SID ^ (m & 0x7fff)) & ~((m >> 16) & 0x7fff) & 0x7fff) == 0) {
+ 			printf("SWEET USB: SMMU smr%u %x already matches 0x%x (s2cr %x)\n", i, m, UD_SMMU_SID, c);
+ 			/*
+-			 * bonito: ABL ran the USB device for fastboot, so it has already mapped the DWC3's stream (flame's ABL had not). Reuse that
+-			 * mapping when it is a translation context: DMA then goes through that bank. If the bank has translation on (ABL's page tables
+-			 * map only ABL's own buffers), switch it off like ABL's other banks (physical addresses), but only when no other stream uses it.
++			 * bonito: ABL ran the USB device for fastboot, so it has already mapped the DWC3's stream (flame's ABL had not). Use that mapping as
++			 * it is. Do NOT touch its context bank: the bank is ABL's/the hypervisor's and a read of its registers stalls the CPU (the first try,
++			 * 0207, printed its SCTLR and the boot panicked 10 s later; flame's notes say the same of a shared bank). ABL's banks have translation
++			 * off (physical addresses), which is what the DMA buffers need; the global S2CR/SMR registers read fine.
+ 			 */
+ 			if (((c >> 16) & 3) == 0 && (c & 0xff) < ncb) {
+-				unsigned b = c & 0xff, users = 0;
+-				for (unsigned j = 0; j < nsmr; j++) {
+-					uint32_t mj = usb_rd(as, 0x800 + 4 * j), cj = usb_rd(as, 0xc00 + 4 * j);
+-					if ((mj >> 31) && ((cj >> 16) & 3) == 0 && (cj & 0xff) == b) {
+-						users++;
+-					}
+-				}
+-				vm_offset_t cbv = as + cbbase + b * pagesz;
+-				uint32_t sctlr = usb_rd(cbv, 0);
+-				printf("SWEET USB: SMMU reusing ABL's cb%u (%u stream(s)): cbar %x cba2r %x sctlr %x fsr %x\n", b, users,
+-				    usb_rd(as, pagesz + 4 * b), usb_rd(as, pagesz + 0x800 + 4 * b), sctlr, usb_rd(cbv, 0x58));
+-				if ((sctlr & 1) && users == 1) {
+-					*(volatile uint32_t *)(cbv + 0x00) = 0xe0;      /* SCTLR: M=0, translation off */
+-					__asm__ volatile ("dsb sy" ::: "memory");
+-					printf("SWEET USB: SMMU cb%u translation switched off, sctlr %x\n", b, usb_rd(cbv, 0));
+-				}
+-				ud_smmu_cb = cbv;
++				printf("SWEET USB: SMMU reusing ABL's mapping: smr%u -> cb%u (bank left untouched)\n", i, c & 0xff);
++				ud_smmu_cb = 0;
+ 				return 0;
+ 			}
+ 			return -1;
