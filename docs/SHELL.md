@@ -1,0 +1,24 @@
+# A shell in iOS on bonito (work in progress, 2026-11-24)
+
+Goal: `ssh` into iOS on the Pixel 3a XL. The Pixel 4 (flame) port got there with USB Ethernet + dropbear (third_party/ios-flame/HANDOFF.md, "SSH into iOS works").
+
+## Status
+| Piece | State |
+| --- | --- |
+| dropbear 2025.88 + dash 0.5.12 + toybox 0.8.12 for iOS 16 arm64 | **built** by `.github/workflows/shell.yml` (`bonito/userland/shell/build.sh`), no weak imports; saved in `/usb/work/shell/bin` |
+| install onto the phone | `bonito/tools/install-shell.sh KERNEL_RUN` written, **not yet run** (needs the phone in the bootloader) |
+| launchd job for dropbear | `bonito/tools/add-shell-job.py` (job `org.iosonpixel.dropbear`, key-only root login, port 22) |
+| host side | `bonito/tools/usbbridge.py`: userspace libusb bridge (the dev container has no CAP_NET_ADMIN or tun, so the host's cdc_ether interface cannot be used): ARP, ICMP, TCP relay `serve 2222:22`. Self-tested against a fake phone only |
+| **USB link from iOS** | **never worked on bonito** ("the XNU USB gadget never enumerates", docs/RECOVERY.md). Kernel driver: xnu patches 0072-0077, 0127 (SMMU stream 0x740), 0128 (QUSB2 PHY init), boot-arg `sweetusb=2` |
+
+## Next step (needs the phone)
+`bonito/tools/usb-test.sh` does one `sweetusb=2` boot (it boots iOS) while the host watches `lsusb` for 1209:0001 and prints the driver's `SWEET USB:` log lines
+(soft reset, SMMU bank, QUSB2 before/after, VBUS override, DSTS / GUSB2PHYCFG / GUSB3PIPECTL every 5 s, bus reset / connect events, SMMU faults). Then fix what that shows,
+run `install-shell.sh`, boot with `sweetusb=2`, `python3 bonito/tools/usbbridge.py serve` and `ssh -p 2222 -i /usb/work/shell/id_ed25519 root@127.0.0.1`.
+
+## Pitfalls found
+- `mkios.sh` put `sweetusb=0` first in the command line and XNU takes the first match: use `USB=2`, an appended `sweetusb=2` is ignored.
+- Toybox in CI needs GNU sed, `CC` as a single command (wrapper script), a stub `<sys/disk.h>`, and no ifconfig / netstat / lsof / uptime (iOS SDK lacks the headers or Linux-only calls).
+- dash needs `make CC="$CC -std=gnu99"` (autoconf 2.72 adds `-std=gnu23`; dash uses K&R definitions) and `ac_cv_func_strchrnul=no` (iOS 16 lacks `strchrnul`; the SDK's weak import would crash with PC 0).
+- iOS root's shell in /etc/passwd is `/bin/sh`, which does not exist on this root: install-shell.sh writes dash there. No symlinks can be created with hfsx_write: toybox applets are shell functions in `/var/root/.profile`.
+- Without a USB link, a non-interactive fallback is possible: a launchd job that runs commands from a file and writes the output to a file read back in the recovery (not built).
