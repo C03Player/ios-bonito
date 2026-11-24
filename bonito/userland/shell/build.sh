@@ -43,6 +43,13 @@ make -j4 CC="$CC -std=gnu99" >/dev/null
 cp src/dash "$OUT/dash"
 
 echo "== toybox"
+# toybox's scripts use $CC as one command name (no spaces): wrap the full iOS compiler command in a script
+cat > "$W/ioscc" <<WRAP
+#!/bin/sh
+exec xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -isysroot $SDK -O2 "\$@"
+WRAP
+chmod +x "$W/ioscc"
+export CC="$W/ioscc"
 cd "$W/toybox-$TOYBOX"
 make allnoconfig >/dev/null
 for a in LS CAT CP MV RM MKDIR RMDIR LN CHMOD CHOWN KILL GREP SED HEAD TAIL WC FIND XARGS SORT UNIQ CUT TR DU UNAME DATE ENV ID WHOAMI HEXDUMP OD DD \
@@ -51,7 +58,7 @@ for a in LS CAT CP MV RM MKDIR RMDIR LN CHMOD CHOWN KILL GREP SED HEAD TAIL WC F
   sed -i.bak "s/^# CONFIG_${a} is not set/CONFIG_${a}=y/" .config
 done
 yes "" | make oldconfig >/dev/null 2>&1 || true
-make CC="$CC" HOSTCC=cc -j4 toybox >/dev/null 2>&1 || make CC="$CC" HOSTCC=cc toybox 2>&1 | tail -n 30
+make CC="$CC" HOSTCC=cc toybox 2>&1 | tail -n 40
 cp toybox "$OUT/toybox"
 
 echo "== sign and check"
