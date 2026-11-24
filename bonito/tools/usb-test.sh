@@ -10,12 +10,12 @@ W=logs/$NAME-lsusb.txt
 : > "$W"
 ( seen=0; start=$(date +%s)
   while true; do
-	if lsusb 2>/dev/null | grep -q "1209:0001"; then
+	if lsusb 2>/dev/null | grep -q -E "18d1:4eed|1209:0001"; then
 		if [ $seen = 0 ]; then
-			seen=1; echo "$(( $(date +%s) - start )) s: 1209:0001 appeared" >> "$W"; lsusb | grep "1209:0001" >> "$W"
+			seen=1; echo "$(( $(date +%s) - start )) s: the gadget appeared" >> "$W"; lsusb | grep -E "18d1:4eed|1209:0001" >> "$W"
 			for i in 1 2 3; do timeout 40 python3 -I bonito/tools/usbbridge.py ping 3 >> "$W" 2>&1 && break; sleep 2; done
 		fi
-	elif [ $seen = 1 ]; then seen=0; echo "$(( $(date +%s) - start )) s: 1209:0001 went away" >> "$W"; fi
+	elif [ $seen = 1 ]; then seen=0; echo "$(( $(date +%s) - start )) s: the gadget went away" >> "$W"; fi
 	sleep 0.5
   done ) &
 WATCH=$!
@@ -23,6 +23,6 @@ trap 'kill $WATCH 2>/dev/null' EXIT
 USB=2 bonito/tools/ci-cycle.sh "$KR" "$NAME" "sweetreboot=200 $EXTRA" 420 "${MARKER:-sweet_usb}"
 RC=$?
 kill $WATCH 2>/dev/null
-echo "--- usb watch:"; cat "$W"; [ -s "$W" ] || echo "1209:0001 never appeared on the host's USB bus"
+echo "--- usb watch:"; cat "$W"; [ -s "$W" ] || echo "the gadget (18d1:4eed / 1209:0001) never appeared on the host's USB bus"
 echo "--- SWEET USB lines of the iOS log:"; grep -a "SWEET USB" "logs/$NAME.txt" 2>/dev/null | head -60 | cut -c1-200
 exit $RC

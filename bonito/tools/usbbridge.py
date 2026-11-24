@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Userspace network bridge to the phone's USB Ethernet gadget (CDC-ECM, VID 1209 PID 0001), without root, tun/tap or a kernel driver.
+"""Userspace network bridge to the phone's USB Ethernet gadget (CDC-ECM, 18d1:4eed (older kernels 1209:0001)), without root, tun/tap or a kernel driver.
 
   usbbridge.py ping [COUNT]               ARP + ICMP echo to the phone (192.168.7.2): proves the link
   usbbridge.py serve [LPORT:RPORT ...]    relay local TCP ports to the phone; default 2222:22  (then: ssh -p 2222 -i KEY root@127.0.0.1)
@@ -17,7 +17,8 @@ try:
 except ImportError:
     sys.exit('needs pyusb: apt-get install python3-usb')
 
-VID, PID = 0x1209, 0x0001
+IDS = [(0x18d1, 0x4eed), (0x1209, 0x0001)]   # the gadget's USB ids: 18d1:4eed now (a vendor the host's udev gives the container access to), 1209:0001 before
+VID, PID = IDS[0]
 HOST_IP, PHONE_IP = bytes([192, 168, 7, 1]), bytes([192, 168, 7, 2])
 HOST_MAC = bytes.fromhex('02005e77ee01')
 PHONE_MAC = bytes.fromhex('02005e77ee02')
@@ -39,9 +40,13 @@ class Link:
     """The USB side: bulk IN/OUT of the ECM data interface, frames in and out."""
 
     def __init__(self):
-        self.dev = usb.core.find(idVendor=VID, idProduct=PID)
+        self.dev = None
+        for v, p in IDS:
+            self.dev = usb.core.find(idVendor=v, idProduct=p)
+            if self.dev is not None:
+                break
         if self.dev is None:
-            sys.exit('no USB device %04x:%04x: the phone\'s Ethernet gadget is not enumerated' % (VID, PID))
+            sys.exit('no USB device %s: the phone\'s Ethernet gadget is not enumerated' % ' or '.join('%04x:%04x' % i for i in IDS))
         cfg = self.dev.get_active_configuration() if self._configured() else None
         if cfg is None:
             self.dev.set_configuration()

@@ -1,0 +1,32 @@
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+index ee86b99..574f673 100644
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -406,7 +406,7 @@ ud_stall(void)
+  * and macOS drive without extra drivers. VID 0x1209 / PID 0x0001 =
+  * pid.codes test ID, not a product.
+  */
+-static const uint8_t ud_dev_desc[18] = {
++static uint8_t ud_dev_desc[18] = {   /* VID/PID patched at start from sweetusbvid / sweetusbpid (default 18d1:4eed, see sweet_usb_gadget_start) */
+ 	18, 1, 0x00, 0x02, 0x02, 0x00, 0x00, 64,
+ 	0x09, 0x12, 0x01, 0x00, 0x00, 0x01, 1, 2, 3, 1,
+ };
+@@ -1380,6 +1380,18 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 	 *   bit 1: HS PHY init and the VBUS override BEFORE the reset (Linux powers the PHY first; ABL may have powered it down)
+ 	 *   bit 2: reset the way downstream does: GCTL core reset + both PHY soft resets held 100 ms each (instead of DCTL CSFTRST)
+ 	 */
++	/*
++	 * USB identity. 1209:0001 enumerated fine but the dev container (rootless, device nodes owned by "nobody") can only open devices the host's
++	 * udev gave an ACL: Google's vendor id gets one (fastboot 18d1:4ee0, recovery 18d1:d0b1 open fine), 1209:0001 did not ("Access denied").
++	 */
++	uint32_t vid = 0x18d1, pid = 0x4eed;
++	PE_parse_boot_argn("sweetusbvid", &vid, sizeof(vid));
++	PE_parse_boot_argn("sweetusbpid", &pid, sizeof(pid));
++	ud_dev_desc[8] = (uint8_t)vid;
++	ud_dev_desc[9] = (uint8_t)(vid >> 8);
++	ud_dev_desc[10] = (uint8_t)pid;
++	ud_dev_desc[11] = (uint8_t)(pid >> 8);
++	printf("SWEET USB: device id %04x:%04x\n", vid & 0xffff, pid & 0xffff);
+ 	int fix = 3;
+ 	PE_parse_boot_argn("sweetusbfix", &fix, sizeof(fix));
+ 	printf("SWEET USB: sweetusbfix %d\n", fix);
