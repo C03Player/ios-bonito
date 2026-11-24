@@ -14,7 +14,7 @@ PLIST = '/System/Library/xpc/launchd.plist'
 JOBS = {
     '/System/Library/LaunchDaemons/org.iosonpixel.dropbear.plist': {
         'Label': 'org.iosonpixel.dropbear',
-        'ProgramArguments': ['/private/var/local/bin/dropbear', '-F', '-E', '-R', '-s', '-p', '22'],
+        'ProgramArguments': ['/private/var/local/bin/dropbear', '-F', '-E', '-R', '-p', '22'],
         'UserName': 'root',
         'RunAtLoad': True,
         'KeepAlive': True,

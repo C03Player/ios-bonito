@@ -6,10 +6,10 @@ Goal: `ssh` into iOS on the Pixel 3a XL. The Pixel 4 (flame) port got there with
 | Piece | State |
 | --- | --- |
 | dropbear 2025.88 + dash 0.5.12 + toybox 0.8.12 for iOS 16 arm64 | **built** by `.github/workflows/shell.yml` (`bonito/userland/shell/build.sh`), no weak imports; saved in `/usb/work/shell/bin` |
-| install onto the phone | `bonito/tools/install-shell.sh KERNEL_RUN` written, **not yet run** (needs the phone in the bootloader) |
+| install onto the phone | `bonito/tools/install-shell.sh KERNEL_RUN` (run 2026-11-24; `ONLY_JOB=1` rewrites just the launchd job, `SKIP_FLUSH=1` when already in the recovery) |
 | launchd job for dropbear | `bonito/tools/add-shell-job.py` (job `org.iosonpixel.dropbear`, key-only root login, port 22) |
 | host side | `bonito/tools/usbbridge.py`: userspace libusb bridge (the dev container has no CAP_NET_ADMIN or tun, so the host's cdc_ether interface cannot be used): ARP, ICMP, TCP relay `serve 2222:22`. Self-tested against a fake phone only |
-| **USB link from iOS** | **never worked on bonito** ("the XNU USB gadget never enumerates", docs/RECOVERY.md). Kernel driver: xnu patches 0072-0077, 0127 (SMMU stream 0x740), 0128 (QUSB2 PHY init), boot-arg `sweetusb=2` |
+| **USB link from iOS** | **works** since 2026-11-24 (patches 0207-0210, see below); `ios-shell.sh` logs in as root over ssh |
 
 ## Next step (needs the phone)
 `bonito/tools/usb-test.sh` does one `sweetusb=2` boot (it boots iOS) while the host watches `lsusb` for 1209:0001 and prints the driver's `SWEET USB:` log lines
@@ -32,3 +32,12 @@ Three fixes made the iOS kernel's USB Ethernet gadget enumerate on the host: (02
 hypervisor: reading it stalls the CPU, 0207 panicked); (0209) the downstream Linux bring-up order: HS PHY init first, and after the controller reset the dwc3-msm "HS-only" wrapper sequence that switches the pipe clock domain to
 the UTMI clock (the SS PHY is not running), otherwise ep0 SETEPCONFIG times out; (0210) a USB id that the dev container may open (it is rootless: only devices with a host udev ACL, such as Google's 18d1, can be opened
 read-write; 1209:0001 enumerated but got "Access denied"). `sweetusbfix` (bit 0 post-reset sequence, bit 1 PHY first, bit 2 downstream-style core reset) and `sweetusbvid` / `sweetusbpid` are boot-args.
+
+## Root shell works (2026-11-24 16:30)
+`EXTRA="sweettouch=0" bonito/tools/ios-shell.sh 'uname -a; id'` boots iOS (USB gadget on, `sweetusbpid=0x4ee1`, `DENY=fairplayd`), waits for the gadget, starts `usbbridge.py serve 2222:22`,
+and runs the commands as root over ssh (dropbear started by launchd). Output: `Darwin iPhone 22.6.0 ... iPhone10,3`, `uid=0`. iOS stays up for `SECS` (default 240, `sweetreboot`); `HOLD=N` keeps the port open N s after the commands.
+Interactive: `ssh -p 2222 -i /usb/work/shell/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@127.0.0.1` while it runs; run `. /var/root/.profile` first for the toybox applets.
+
+Known problems: with the USB driver active the touchscreen thread panics (`bt_thread` -> `io_map` -> `kmem_alloc ... failed with 3`, about 10 s after the USB driver mapped ~1.7 MB of device memory that it never unmaps),
+so the shell is used with `sweettouch=0`; the fix would be `ml_io_unmap` of the GCC (576 KB) and SMMU (1 MB) mappings after use. The command line is limited to 591 characters and extra arguments are dropped silently (use `DENY=fairplayd`).
+dropbear is built without password auth, so its launchd job must not pass `-s`. `bonito/tools/ksym-panic.py LOG KERNEL` names a panic's backtrace.

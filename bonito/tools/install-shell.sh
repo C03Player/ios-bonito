@@ -64,6 +64,7 @@ mk() {
 	fail "mkdir $1"
 }
 
+if [ -z "$ONLY_JOB" ]; then   # ONLY_JOB=1: rewrite just the launchd job (files already installed)
 mk /private/etc/dropbear 700
 mk /private/var/root/.ssh 700
 for n in dropbear dropbearmulti scp; do putfile $BIN/dropbearmulti /private/var/local/bin/$n 755 || fail "$n"; done
@@ -72,6 +73,7 @@ putfile $BIN/toybox /private/var/local/bin/toybox 755 || fail toybox
 putfile $BIN/dash /bin/sh 755 || fail "/bin/sh"
 putfile $T/profile /private/var/root/.profile 644 || fail ".profile"
 putfile $T/authorized_keys /private/var/root/.ssh/authorized_keys 600 || fail authorized_keys
+fi
 
 # 2. the launchd job, then read the plist back and parse it (a damaged tail once made iOS panic "No service cache")
 mkdir -p logs/shell-undo
