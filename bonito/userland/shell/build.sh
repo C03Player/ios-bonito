@@ -46,9 +46,12 @@ echo "== toybox"
 # toybox's scripts use $CC as one command name (no spaces): wrap the full iOS compiler command in a script
 cat > "$W/ioscc" <<WRAP
 #!/bin/sh
-exec xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -isysroot $SDK -O2 "\$@"
+exec xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -isysroot $SDK -I$W/stub -O2 "\$@"
 WRAP
 chmod +x "$W/ioscc"
+# the iOS SDK has no <sys/disk.h> (toybox's fdlength() wants two ioctl numbers from it)
+mkdir -p "$W/stub/sys"
+printf '#define DKIOCGETBLOCKSIZE 0x40046418\n#define DKIOCGETBLOCKCOUNT 0x40086419\n' > "$W/stub/sys/disk.h"
 export CC="$W/ioscc"
 # toybox's scripts need GNU sed (macOS ships BSD sed: "invalid command code")
 PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; export PATH
