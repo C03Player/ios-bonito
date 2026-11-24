@@ -26,7 +26,8 @@ PS1='ios# '
 PROF
 cp "$KEYS/id_ed25519.pub" $T/authorized_keys
 
-# 1. journal flush boot (as set-phone-file.sh)
+# 1. journal flush boot (as set-phone-file.sh); SKIP_FLUSH=1 when the phone is already in the recovery with a flushed journal
+if [ -z "$SKIP_FLUSH" ]; then
 OK=0
 for try in 1 2 3; do
 	bonito/tools/ci-cycle.sh "$KR" fl_shell "sweetnoinit=1 sweetreboot=150" 400 "sweetfb_sync" > /tmp/cycle-fl_shell.log 2>&1
@@ -38,6 +39,9 @@ rm -f logs/fl_shell.txt logs/fl_shell.png bonito/shim/out/fl_shell.img work/fl_s
 fastboot set_active a >/dev/null 2>&1; fastboot reboot >/dev/null 2>&1
 for i in $(seq 1 40); do adb devices | grep -q recovery && break; sleep 5; done
 adb devices | grep -q recovery || fail "no recovery"
+adb shell 'setprop ctl.stop sweetreboot; setprop ctl.stop sweetdiag' >/dev/null 2>&1
+fi
+adb devices | grep -q recovery || fail "the phone is not in the recovery"
 adb shell 'setprop ctl.stop sweetreboot; setprop ctl.stop sweetdiag' >/dev/null 2>&1
 
 W="python3 -I bonito/tools/hfsx_write.py adb:$V"
@@ -53,7 +57,12 @@ putfile() {  # putfile LOCAL REMOTE MODE
 	else $W put "$1" "$2" "$3" < /dev/null >> $L 2>&1 || return 1; fi
 	verify "$1" "$2"
 }
-mk() { exists "$1" || $W mkdir "$1" "$2" < /dev/null >> $L 2>&1; exists "$1" || fail "mkdir $1"; }
+mk() {
+	exists "$1" && return 0
+	$W mkdir "$1" "$2" < /dev/null >> $L 2>&1
+	for t in 1 2 3; do sleep 3; adb shell 'sync; echo 3 > /proc/sys/vm/drop_caches' < /dev/null; exists "$1" && return 0; done
+	fail "mkdir $1"
+}
 
 mk /private/etc/dropbear 700
 mk /private/var/root/.ssh 700
