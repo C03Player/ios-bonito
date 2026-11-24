@@ -22,3 +22,7 @@ run `install-shell.sh`, boot with `sweetusb=2`, `python3 bonito/tools/usbbridge.
 - dash needs `make CC="$CC -std=gnu99"` (autoconf 2.72 adds `-std=gnu23`; dash uses K&R definitions) and `ac_cv_func_strchrnul=no` (iOS 16 lacks `strchrnul`; the SDK's weak import would crash with PC 0).
 - iOS root's shell in /etc/passwd is `/bin/sh`, which does not exist on this root: install-shell.sh writes dash there. No symlinks can be created with hfsx_write: toybox applets are shell functions in `/var/root/.profile`.
 - Without a USB link, a non-interactive fallback is possible: a launchd job that runs commands from a file and writes the output to a file read back in the recovery (not built).
+
+## First USB test (2026-11-24)
+`usb-test.sh` on kernel 45029003673: the driver reached `ud_smmu_setup()` and gave up there (`SMMU smr4 80000740 already matches 0x740`): ABL had already mapped the DWC3's stream 0x740 to context bank 2,
+and the code taken from flame (where ABL had not) treated an existing match as an error, so the device was never started and the host saw nothing. Patch 0207 reuses ABL's bank instead.
