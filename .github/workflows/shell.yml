@@ -1,0 +1,30 @@
+name: userland-shell
+
+# dropbear + dash + toybox for iOS 16 arm64 (a root ssh shell once the phone has a network link). Source: bonito/userland/shell/build.sh. Artifact "userland-shell".
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "bonito/userland/shell/**"
+      - ".github/workflows/shell.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          brew install autoconf automake
+          xcrun --sdk iphoneos --show-sdk-path
+          sh bonito/userland/shell/build.sh out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: userland-shell
+          path: out/
+          retention-days: 30
