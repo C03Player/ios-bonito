@@ -50,6 +50,8 @@ exec xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -isysroo
 WRAP
 chmod +x "$W/ioscc"
 export CC="$W/ioscc"
+# toybox's scripts need GNU sed (macOS ships BSD sed: "invalid command code")
+PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; export PATH
 cd "$W/toybox-$TOYBOX"
 make allnoconfig >/dev/null
 for a in LS CAT CP MV RM MKDIR RMDIR LN CHMOD CHOWN KILL GREP SED HEAD TAIL WC FIND XARGS SORT UNIQ CUT TR DU UNAME DATE ENV ID WHOAMI HEXDUMP OD DD \
