@@ -38,7 +38,8 @@ cd "$W/dash-$DASH"
 [ -x configure ] || ./autogen.sh
 # dash uses K&R function definitions: the runner's clang rejects them in its default (C23) mode
 ac_cv_func_strchrnul=no ./configure --host=aarch64-apple-darwin CC="$CC -std=gnu99" >/dev/null
-make -j4 >/dev/null
+# autoconf 2.72 folds -std=gnu23 into CC: override CC on the make command line instead
+make -j4 CC="$CC -std=gnu99" >/dev/null
 cp src/dash "$OUT/dash"
 
 echo "== toybox"
