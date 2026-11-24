@@ -1,0 +1,166 @@
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+index 0f2ee6d..ee86b99 100644
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -282,6 +282,62 @@ ud_sleep_ms(unsigned ms)
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
++/*
++ * bonito: Qualcomm wrapper + DWC3 registers of the downstream Linux bring-up (drivers/usb/dwc3/dwc3-msm.c, core.c), used by sweetusbfix below.
++ * The SS PHY is not running on iOS, so after every controller reset the wrapper must switch the controller's pipe clock domain to the UTMI clock
++ * (POST_RESET "HS-only" sequence); without it endpoint commands that need that clock never complete (ep0 SETEPCONFIG timed out in the 2026-11-24 test).
++ */
++#define UW_GUSB2PHYCFG          0xc200
++#define UW_GUSB3PIPECTL         0xc2c0
++#define UW_GUCTL                0xc12c
++#define UW_GFLADJ               0xc630
++#define UW_GDBGLTSSM            0xc164
++#define UW_PHYSOFTRST           (1u << 31)
++#define UW_GCTL_CORESOFTRESET   (1u << 11)
++#define UW_QS_GENERAL_CFG       0x08
++#define UW_QS_CGCTL             0x28
++#define UW_PIPE_UTMI_CLK_SEL    (1u << 0)
++#define UW_PIPE3_PHYSTATUS_SW   (1u << 3)
++#define UW_PIPE_UTMI_CLK_DIS    (1u << 8)
++static vm_offset_t ud_qs;       /* QSCRATCH mapping, set before the reset */
++
++static void
++ud_dump_regs(const char *why, unsigned ep)
++{
++	printf("SWEET USB: %s: DEPCMD%u %08x par %08x %08x %08x | DSTS %08x DCTL %08x GCTL %08x GSTS %08x | GUSB2PHYCFG %08x GUSB3PIPECTL %08x LTSSM %08x\n",
++	    why, ep, dwc_rd(DEPCMD(ep)), dwc_rd(DEPCMDPAR0(ep)), dwc_rd(DEPCMDPAR1(ep)), dwc_rd(DEPCMDPAR2(ep)),
++	    dwc_rd(DSTS), dwc_rd(DCTL), dwc_rd(GCTL), dwc_rd(0xc118), dwc_rd(UW_GUSB2PHYCFG), dwc_rd(UW_GUSB3PIPECTL), dwc_rd(UW_GDBGLTSSM));
++	if (ud_qs) {
++		printf("SWEET USB: %s: QSCRATCH GENERAL_CFG %08x HS_PHY_CTRL %08x SS_PHY_CTRL %08x CGCTL %08x | GUCTL %08x GFLADJ %08x\n", why,
++		    usb_rd(ud_qs, UW_QS_GENERAL_CFG), usb_rd(ud_qs, QSCRATCH_HS_PHY_CTRL), usb_rd(ud_qs, QSCRATCH_SS_PHY_CTRL),
++		    usb_rd(ud_qs, UW_QS_CGCTL), dwc_rd(UW_GUCTL), dwc_rd(UW_GFLADJ));
++	}
++}
++
++/* dwc3-msm POST_RESET: wrapper clock gating, HS-only pipe clock switch, reference clock timing (19.2 MHz UTMI clock). */
++static void
++ud_wrapper_post_reset(void)
++{
++	if (!ud_qs) {
++		return;
++	}
++	*(volatile uint32_t *)(ud_qs + UW_QS_CGCTL) = usb_rd(ud_qs, UW_QS_CGCTL) | 0x18;
++	*(volatile uint32_t *)(ud_qs + UW_QS_GENERAL_CFG) = usb_rd(ud_qs, UW_QS_GENERAL_CFG) | UW_PIPE_UTMI_CLK_DIS;
++	delay(5);
++	*(volatile uint32_t *)(ud_qs + UW_QS_GENERAL_CFG) = usb_rd(ud_qs, UW_QS_GENERAL_CFG) | UW_PIPE_UTMI_CLK_SEL | UW_PIPE3_PHYSTATUS_SW;
++	delay(5);
++	*(volatile uint32_t *)(ud_qs + UW_QS_GENERAL_CFG) = usb_rd(ud_qs, UW_QS_GENERAL_CFG) & ~UW_PIPE_UTMI_CLK_DIS;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	uint32_t guctl = (dwc_rd(UW_GUCTL) & ~(0x3ffu << 22)) | (52u << 22);
++	uint32_t gfladj = dwc_rd(UW_GFLADJ);
++	gfladj &= ~((1u << 31) | (0x7fu << 24) | (1u << 23) | (0x3fffu << 8));
++	gfladj |= (12u << 24) | (1u << 31) | (1u << 23) | (200u << 8);
++	dwc_wr(UW_GUCTL, guctl);
++	dwc_wr(UW_GFLADJ, gfladj);
++	printf("SWEET USB: wrapper post-reset done: GENERAL_CFG %08x CGCTL %08x GUCTL %08x GFLADJ %08x\n",
++	    usb_rd(ud_qs, UW_QS_GENERAL_CFG), usb_rd(ud_qs, UW_QS_CGCTL), dwc_rd(UW_GUCTL), dwc_rd(UW_GFLADJ));
++}
++
+ static int
+ ud_epcmd(unsigned ep, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
+ {
+@@ -289,7 +345,7 @@ ud_epcmd(unsigned ep, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
+ 	dwc_wr(DEPCMDPAR1(ep), p1);
+ 	dwc_wr(DEPCMDPAR2(ep), p2);
+ 	dwc_wr(DEPCMD(ep), cmd | DEPCMD_CMDACT);
+-	for (int i = 0; i < 1000; i++) {
++	for (int i = 0; i < 20000; i++) {
+ 		uint32_t v = dwc_rd(DEPCMD(ep));
+ 		if (!(v & DEPCMD_CMDACT)) {
+ 			uint32_t status = (v >> 12) & 0xf;
+@@ -299,9 +355,10 @@ ud_epcmd(unsigned ep, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
+ 			}
+ 			return 0;
+ 		}
+-		delay(1);
++		delay(5);
+ 	}
+ 	printf("SWEET USB: ep%u cmd 0x%x timeout\n", ep, cmd & 0xf);
++	ud_dump_regs("ep cmd timeout", ep);
+ 	return -1;
+ }
+ 
+@@ -1317,16 +1374,54 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 		return;
+ 	}
+ 
+-	/* Device controller soft reset (PHY and global setup stay as ABL left them). */
+-	dwc_wr(DCTL, DCTL_CSFTRST);
+-	int i;
+-	for (i = 0; i < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); i++) {
+-		delay(1000);
++	/*
++	 * sweetusbfix (default 3) selects the bring-up order, after the downstream Linux driver:
++	 *   bit 0: wrapper post-reset sequence (HS-only pipe clock switch, clock gating, reference clock timing) after the reset
++	 *   bit 1: HS PHY init and the VBUS override BEFORE the reset (Linux powers the PHY first; ABL may have powered it down)
++	 *   bit 2: reset the way downstream does: GCTL core reset + both PHY soft resets held 100 ms each (instead of DCTL CSFTRST)
++	 */
++	int fix = 3;
++	PE_parse_boot_argn("sweetusbfix", &fix, sizeof(fix));
++	printf("SWEET USB: sweetusbfix %d\n", fix);
++	ud_qs = ml_io_map(QSCRATCH_PA, 0x100);
++	if (fix & 2) {
++		ud_hsphy_init();
++		if (ud_qs) {
++			*(volatile uint32_t *)(ud_qs + QSCRATCH_HS_PHY_CTRL) = usb_rd(ud_qs, QSCRATCH_HS_PHY_CTRL) | UTMI_OTG_VBUS_VALID | SW_SESSVLD_SEL;
++			*(volatile uint32_t *)(ud_qs + QSCRATCH_SS_PHY_CTRL) = usb_rd(ud_qs, QSCRATCH_SS_PHY_CTRL) | LANE0_PWR_PRESENT;
++			__asm__ volatile ("dsb sy" ::: "memory");
++			printf("SWEET USB: PHY first: VBUS override on: HS_PHY_CTRL %08x SS_PHY_CTRL %08x\n",
++			    usb_rd(ud_qs, QSCRATCH_HS_PHY_CTRL), usb_rd(ud_qs, QSCRATCH_SS_PHY_CTRL));
++		}
+ 	}
+-	printf("SWEET USB: soft reset %s after %d ms, GCTL 0x%08x DCFG 0x%08x\n",
+-	    (dwc_rd(DCTL) & DCTL_CSFTRST) ? "STUCK" : "done", i, dwc_rd(GCTL), dwc_rd(DCFG));
+-	if (dwc_rd(DCTL) & DCTL_CSFTRST) {
+-		return;
++	int i = 0;
++	if (fix & 4) {
++		dwc_wr(GCTL, dwc_rd(GCTL) | UW_GCTL_CORESOFTRESET);
++		dwc_wr(UW_GUSB3PIPECTL, dwc_rd(UW_GUSB3PIPECTL) | UW_PHYSOFTRST);
++		dwc_wr(UW_GUSB2PHYCFG, dwc_rd(UW_GUSB2PHYCFG) | UW_PHYSOFTRST);
++		if (!(fix & 2)) {
++			ud_hsphy_init();
++		}
++		delay(100000);
++		dwc_wr(UW_GUSB3PIPECTL, dwc_rd(UW_GUSB3PIPECTL) & ~UW_PHYSOFTRST);
++		dwc_wr(UW_GUSB2PHYCFG, dwc_rd(UW_GUSB2PHYCFG) & ~UW_PHYSOFTRST);
++		delay(100000);
++		dwc_wr(GCTL, dwc_rd(GCTL) & ~UW_GCTL_CORESOFTRESET);
++		printf("SWEET USB: downstream-style core reset done, GCTL 0x%08x DCFG 0x%08x\n", dwc_rd(GCTL), dwc_rd(DCFG));
++	} else {
++		/* Device controller soft reset (PHY and global setup stay as ABL left them). */
++		dwc_wr(DCTL, DCTL_CSFTRST);
++		for (i = 0; i < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); i++) {
++			delay(1000);
++		}
++		printf("SWEET USB: soft reset %s after %d ms, GCTL 0x%08x DCFG 0x%08x\n",
++		    (dwc_rd(DCTL) & DCTL_CSFTRST) ? "STUCK" : "done", i, dwc_rd(GCTL), dwc_rd(DCFG));
++		if (dwc_rd(DCTL) & DCTL_CSFTRST) {
++			return;
++		}
++	}
++	if (fix & 1) {
++		ud_wrapper_post_reset();
+ 	}
+ 
+ 	printf("SWEET USB: step event buffer at 0x%llx\n", ud.dma_pa + UD_EVT);
+@@ -1357,9 +1452,11 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 	printf("SWEET USB: step start setup\n");
+ 	ud_start_setup();
+ 	printf("SWEET USB: step qscratch\n");
+-	ud_hsphy_init();
++	if (!(fix & 2)) {
++		ud_hsphy_init();
++	}
+ 
+-	vm_offset_t qs = ml_io_map(QSCRATCH_PA, 0x100);
++	vm_offset_t qs = (fix & 2) ? 0 : ml_io_map(QSCRATCH_PA, 0x100);
+ 	if (qs != 0) {
+ 		uint32_t hs = usb_rd(qs, QSCRATCH_HS_PHY_CTRL), ss = usb_rd(qs, QSCRATCH_SS_PHY_CTRL);
+ 		printf("SWEET USB: QSCRATCH HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x GENERAL_CFG 0x%08x\n",
